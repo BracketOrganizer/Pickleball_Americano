@@ -105,14 +105,14 @@ function handleLiveOpenChange(nowOpen){
 
 function startLiveWatch(){
   if(unsubLiveWatch) return;
-  unsubLiveWatch = onSnapshot(doc(db,'tournament','status'), (snap)=>{
+  unsubLiveWatch = onSnapshot(doc(db,'tournamentStatus','live'), (snap)=>{
     if(!snap.exists()) return;
     handleLiveOpenChange(snap.data().liveOpen === true);
   }, (e)=>{ console.warn('startLiveWatch', e); });
   if(!liveWatchIv){
     liveWatchIv = setInterval(async ()=>{
       try {
-        const snap = await getDoc(doc(db,'tournament','status'));
+        const snap = await getDoc(doc(db,'tournamentStatus','live'));
         if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){}
     }, 4000);
@@ -127,7 +127,7 @@ startLiveWatch();
 document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
   try {
-    const snap = await getDoc(doc(db,'tournament','status'));
+    const snap = await getDoc(doc(db,'tournamentStatus','live'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
@@ -165,7 +165,7 @@ onAuthStateChanged(auth, async (user)=>{
     // Spectateur : bloquer si le live n'est pas ouvert
     if(USER_ROLE === 'spectator'){
       try {
-        const snap = await getDoc(doc(db,'tournament','status'));
+        const snap = await getDoc(doc(db,'tournamentStatus','live'));
         if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ ST.liveOpen = false; }
       if(!ST.liveOpen){
@@ -185,7 +185,7 @@ onAuthStateChanged(auth, async (user)=>{
     unsubAll();
     // Charger liveOpen depuis Firestore avant d'afficher l'écran de connexion
     try {
-      const snap = await getDoc(doc(db,'tournament','status'));
+      const snap = await getDoc(doc(db,'tournamentStatus','live'));
       if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
     } catch(e){ /* réseau absent : live considéré fermé par défaut */ }
     showLogin();
@@ -222,7 +222,7 @@ window.logout = async function(){
 // ── Mode Live sans compte avec redirection ────────────────
 window.enterLiveModeAndGo = async function(target){
   try {
-    const snap = await getDoc(doc(db,'tournament','status'));
+    const snap = await getDoc(doc(db,'tournamentStatus','live'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('enterLiveModeAndGo: relecture liveOpen échouée', e); }
   if(target !== 'R' && !ST.liveOpen){
@@ -510,7 +510,7 @@ function subscribeToResults(){
 // ══════════════════════════════════════════════════════════
 async function saveTournament(fields){
   if('liveOpen' in fields){
-    try { await setDoc(doc(db,'tournament','status'), { liveOpen: fields.liveOpen }, { merge:true }); }
+    try { await setDoc(doc(db,'tournamentStatus','live'), { liveOpen: fields.liveOpen }, { merge:true }); }
     catch(e){ console.warn('saveTournament status', e); }
   }
   if(!isAdmin()){ alert("Action réservée à l'admin."); return; }
@@ -610,7 +610,7 @@ async function _savePlayerName(idx, newName){
 // Accès live depuis le règlement ou la nav spec — bloqué si live fermé
 window.spectatorGoLive = async function(n){
   try {
-    const snap = await getDoc(doc(db,'tournament','status'));
+    const snap = await getDoc(doc(db,'tournamentStatus','live'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('spectatorGoLive: relecture liveOpen échouée', e); }
   if(n !== 'R' && isLiveBlocked()){
