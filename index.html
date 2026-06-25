@@ -1528,6 +1528,18 @@ function pObj(id){return ST.players.find(x=>x.id===id);}
 
 function renderGen(){
   const {n,t,r,mt,tt,tp,start}=ST.cfg;const p=computeScheduleParams(ST.cfg);
+  // Recalculer les waveTimes si manquants (schedule chargé depuis Firestore sans recalcul)
+  if(ST.schedule.length && ST.schedule[0].waves.length && !ST.schedule[0].waves[0].waveTime){
+    let wt=start||'09:00';
+    ST.schedule.forEach(rd=>{
+      rd.roundTime=wt;
+      const nw=rd.waves.filter(wv=>!wv._isEarlyWave);
+      const nt=[];
+      nw.forEach((wv,i)=>{wv.waveTime=wt;nt.push(wt);if(i<nw.length-1)wt=addMinutes(wt,mt+tt);});
+      rd.waves.filter(wv=>wv._isEarlyWave).forEach(wv=>{const pi=wv._parentWaveIdx!=null?wv._parentWaveIdx:nt.length-1;wv.waveTime=nt[pi]||wt;});
+      wt=addMinutes(wt,mt+tt);
+    });
+  }
   // playCount : chaque joueur doit jouer exactement r matchs (les anticipés remplacent un match normal)
   // On compte tous les matchs de toutes les vagues — chaque apparition = 1 match joué
   const playCount={};ST.players.slice(0,n).forEach(pl=>playCount[pl.id]=0);
@@ -1536,7 +1548,7 @@ function renderGen(){
   const pCnt={};let dupCount=0;
   ST.schedule.forEach(rd=>rd.waves.forEach(wv=>wv.matches.forEach(m=>{[[m.pA1,m.pA2],[m.pB1,m.pB2]].forEach(([a,b])=>{const k=pk(a,b);pCnt[k]=(pCnt[k]||0)+1;if(pCnt[k]===2)dupCount++;});})));
   const totalMatches=ST.schedule.reduce((s,rd)=>rd.waves.reduce((s2,wv)=>s2+wv.matches.length,s),0);
-  const lastRound=ST.schedule[ST.schedule.length-1];const lastWave=lastRound.waves[lastRound.waves.length-1];const endTime=addMinutes(lastWave.waveTime,mt);
+  const lastRound=ST.schedule[ST.schedule.length-1];const lastWave=lastRound.waves[lastRound.waves.length-1];const endTime=lastWave&&lastWave.waveTime?addMinutes(lastWave.waveTime,mt):'--:--';
   const gib=document.getElementById('genInfoBox');
   if(gib){gib.className='info info-g';gib.innerHTML=`✅ <strong>${n} joueurs</strong> · <strong>${t} terrains</strong> · <strong>${r} tours</strong> · ${p.wavesPerRound} vague${p.wavesPerRound>1?'s':''}/tour<br>Matchs/joueur : <strong>${minPlay}–${maxPlay}</strong>${p.rem>0?` · <strong>${p.rem} remplaçant${p.rem>1?'s':''}</strong>`:'· <strong>Tous jouent</strong>'}<br>Total matchs : <strong>${totalMatches}</strong> · Début : <strong>${start}</strong> → Fin : <strong>${endTime}</strong>`;}
   let totalLvDiff=0,matchCount=0,earlyCount=0,relaxCount=0;
