@@ -38,7 +38,6 @@ const firebaseConfig = {
   appId: "1:64638196209:web:dd47d079b5698ee80fcc50"
 };
 
-
 const app       = initializeApp(firebaseConfig);
 const auth      = getAuth(app);
 const db        = getFirestore(app);
@@ -260,17 +259,6 @@ window.enterLiveMode = function(){
   subscribeToTournamentPublic();
   subscribeToResultsPublic();
 };
-// Live qui se ferme PENDANT qu'un spectateur anonyme regarde déjà :
-// Firestore renvoie permission-denied sur tournament/results (cas normal,
-// pas une vraie erreur). On le traite comme un retour à liveOpen=false
-// plutôt que de laisser planter les listeners en console.
-function handlePublicPermissionDenied(src){
-  if(USER_ROLE !== 'spectator') return; // ne concerne que le mode spectateur anonyme
-  console.warn('Accès live refusé (probablement fermé) —', src);
-  if(unsubTournament){ unsubTournament(); unsubTournament=null; }
-  if(unsubResults)   { unsubResults();    unsubResults=null;    }
-  handleLiveOpenChange(false);
-}
 function subscribeToTournamentPublic(){
   if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'tournament','current'), (snap)=>{
@@ -284,10 +272,7 @@ function subscribeToTournamentPublic(){
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
     if(ST.schedule.length>0 && ST.page<4) goTo(4);
-  }, (e)=>{
-    console.warn('subscribeToTournamentPublic', e);
-    if(e && e.code === 'permission-denied') handlePublicPermissionDenied('tournament');
-  });
+  }, (e)=>{ console.warn('subscribeToTournamentPublic', e); });
 }
 function normalizeResult(data){
   return { ga: data.ga==null?'':data.ga, gb: data.gb==null?'':data.gb };
@@ -300,9 +285,6 @@ function subscribeToResultsPublic(){
     });
     if(ST.page===4){ renderMatches(); renderMiniStandings(); checkDone(); }
     if(ST.page===5) renderFinal();
-  }, (e)=>{
-    console.warn('subscribeToResultsPublic', e);
-    if(e && e.code === 'permission-denied') handlePublicPermissionDenied('results');
   });
 }
 
@@ -511,7 +493,7 @@ function subscribeToTournament(){
     if(isAdmin() && ST.page===2) renderPlayers();
     // Scorer : si le tournoi est actif et sur une page setup, rediriger vers p4
     if(!isAdmin() && ST.schedule.length>0 && ST.page<4) goTo(4);
-  }, (e)=>{ console.warn('subscribeToTournament', e); });
+  });
 }
 function subscribeToResults(){
   unsubResults = onSnapshot(collection(db,'results'), (snap)=>{
@@ -521,9 +503,8 @@ function subscribeToResults(){
     });
     if(ST.page===4){ renderMatches(); renderMiniStandings(); checkDone(); }
     if(ST.page===5) renderFinal();
-  }, (e)=>{ console.warn('subscribeToResults', e); });
+  });
 }
-
 
 // ══════════════════════════════════════════════════════════
 // FIRESTORE — ÉCRITURES
