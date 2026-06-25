@@ -52,6 +52,9 @@ const gProvider = new GoogleAuthProvider();
 let CURRENT_USER = null;
 let USER_ROLE    = null;
 let unsubTournament = null;
+let unsubLiveWatch  = null;
+let liveWatchIv     = null;
+let pendingSpecTarget = null;
 let unsubResults    = null;
 
 const ST = {
@@ -71,6 +74,63 @@ function isAdmin()  { return USER_ROLE === 'admin'; }
 function isScorer() { return USER_ROLE === 'admin' || USER_ROLE === 'scorer'; }
 // Live bloqué = spectateur ET liveOpen pas encore true
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
+
+function handleLiveOpenChange(nowOpen){
+  const wasOpen = ST.liveOpen;
+  ST.liveOpen = nowOpen;
+  updateLiveToggleBtn();
+  if(wasOpen && !ST.liveOpen){
+    const appScreen = document.getElementById('appScreen');
+    const isInApp = appScreen && (appScreen.style.display==='block'||appScreen.style.display==='');
+    if(isInApp && (USER_ROLE === 'spectator' || USER_ROLE === null)){
+      const overlay = document.getElementById('liveClosedOverlay');
+      if(overlay) overlay.style.display = 'flex';
+      pendingSpecTarget = ST.page;
+    }
+    return;
+  }
+  if(!wasOpen && ST.liveOpen && pendingSpecTarget !== null){
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display = 'none';
+    const target = pendingSpecTarget;
+    pendingSpecTarget = null;
+    if(USER_ROLE === 'spectator'){
+      if(target === 'R') toggleRules();
+      else goTo(typeof target === 'number' ? target : 4);
+    } else {
+      enterLiveModeAndGo(target);
+    }
+  }
+}
+
+function startLiveWatch(){
+  if(unsubLiveWatch) return;
+  unsubLiveWatch = onSnapshot(doc(db,'tournament','status'), (snap)=>{
+    if(!snap.exists()) return;
+    handleLiveOpenChange(snap.data().liveOpen === true);
+  }, (e)=>{ console.warn('startLiveWatch', e); });
+  if(!liveWatchIv){
+    liveWatchIv = setInterval(async ()=>{
+      try {
+        const snap = await getDoc(doc(db,'tournament','status'));
+        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+      } catch(e){}
+    }, 4000);
+  }
+}
+function stopLiveWatch(){
+  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
+  if(liveWatchIv){ clearInterval(liveWatchIv); liveWatchIv=null; }
+}
+startLiveWatch();
+
+document.addEventListener('visibilitychange', async ()=>{
+  if(document.visibilityState !== 'visible') return;
+  try {
+    const snap = await getDoc(doc(db,'tournament','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('resync visibilitychange', e); }
+});
 
 // ══════════════════════════════════════════════════════════
 // AUTH
@@ -105,8 +165,8 @@ onAuthStateChanged(auth, async (user)=>{
     // Spectateur : bloquer si le live n'est pas ouvert
     if(USER_ROLE === 'spectator'){
       try {
-        const snap = await getDoc(doc(db,'tournament','current'));
-        ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
+        const snap = await getDoc(doc(db,'tournament','status'));
+        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ ST.liveOpen = false; }
       if(!ST.liveOpen){
         await signOut(auth);
@@ -125,8 +185,8 @@ onAuthStateChanged(auth, async (user)=>{
     unsubAll();
     // Charger liveOpen depuis Firestore avant d'afficher l'écran de connexion
     try {
-      const snap = await getDoc(doc(db,'tournament','current'));
-      if(snap.exists()) ST.liveOpen = snap.data().liveOpen === true;
+      const snap = await getDoc(doc(db,'tournament','status'));
+      if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
     } catch(e){ /* réseau absent : live considéré fermé par défaut */ }
     showLogin();
   }
@@ -135,6 +195,8 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubResults)   { unsubResults();    unsubResults=null;    }
+  stopLiveWatch();
+  startLiveWatch();
 }
 
 // ── Auth actions ─────────────────────────────────────────
@@ -158,18 +220,19 @@ window.logout = async function(){
 };
 
 // ── Mode Live sans compte avec redirection ────────────────
-window.enterLiveModeAndGo = function(target){
-  // Le règlement est toujours accessible, mais Live/Classement nécessitent liveOpen
+window.enterLiveModeAndGo = async function(target){
+  try {
+    const snap = await getDoc(doc(db,'tournament','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('enterLiveModeAndGo: relecture liveOpen échouée', e); }
   if(target !== 'R' && !ST.liveOpen){
+    pendingSpecTarget = target;
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
     return;
   }
   CURRENT_USER = null;
   USER_ROLE    = 'spectator';
-  // Si on a passé la garde ci-dessus, le live est forcément ouvert
-  // On le confirme immédiatement (le snapshot Firestore le reconfirmera)
-  if(target !== 'R') ST.liveOpen = true;
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
@@ -196,6 +259,7 @@ window.enterLiveMode = function(){
   subscribeToResultsPublic();
 };
 function subscribeToTournamentPublic(){
+  if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'tournament','current'), (snap)=>{
     if(!snap.exists()) return;
     const data=snap.data();
@@ -203,12 +267,11 @@ function subscribeToTournamentPublic(){
     if(data.players)  ST.players  = data.players;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    // Statut live (contrôlé par l'admin)
-    ST.liveOpen = data.liveOpen === true;
+    handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
     if(ST.schedule.length>0 && ST.page<4) goTo(4);
-  });
+  }, (e)=>{ console.warn('subscribeToTournamentPublic', e); });
 }
 function normalizeResult(data){
   return { ga: data.ga==null?'':data.ga, gb: data.gb==null?'':data.gb };
@@ -421,8 +484,7 @@ function subscribeToTournament(){
     if(data.players)  ST.players  = data.players;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    ST.liveOpen = data.liveOpen === true;
-    updateLiveToggleBtn();
+    handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===3) renderGen();
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
@@ -447,6 +509,10 @@ function subscribeToResults(){
 // FIRESTORE — ÉCRITURES
 // ══════════════════════════════════════════════════════════
 async function saveTournament(fields){
+  if('liveOpen' in fields){
+    try { await setDoc(doc(db,'tournament','status'), { liveOpen: fields.liveOpen }, { merge:true }); }
+    catch(e){ console.warn('saveTournament status', e); }
+  }
   if(!isAdmin()){ alert("Action réservée à l'admin."); return; }
   try {
     await setDoc(doc(db,'tournament','current'),{
@@ -542,18 +608,26 @@ async function _savePlayerName(idx, newName){
 // NAVIGATION
 // ══════════════════════════════════════════════════════════
 // Accès live depuis le règlement ou la nav spec — bloqué si live fermé
-window.spectatorGoLive = function(n){
-  if(isLiveBlocked()){
-    document.getElementById('liveClosedOverlay').style.display='flex';
+window.spectatorGoLive = async function(n){
+  try {
+    const snap = await getDoc(doc(db,'tournament','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('spectatorGoLive: relecture liveOpen échouée', e); }
+  if(n !== 'R' && isLiveBlocked()){
+    pendingSpecTarget = n;
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display='flex';
     return;
   }
   goTo(n);
 };
 
 window.goTo = function(n){
-  // Spectateur : bloquer Live (4) et Classement (5) si live fermé
-  if(isLiveBlocked() && (n===4||n===5)){
-    document.getElementById('liveClosedOverlay').style.display='flex';
+  // Spectateur : bloquer toute navigation si live fermé
+  if(isLiveBlocked() && n !== 'R'){
+    pendingSpecTarget = n;
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display='flex';
     return;
   }
   // Pages 1-3 : admin uniquement
@@ -1834,8 +1908,8 @@ window.openReglement = function(){
 window.toggleLiveOpen = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   const newVal = !ST.liveOpen;
+  handleLiveOpenChange(newVal);
   await saveTournament({ liveOpen: newVal });
-  // ST.liveOpen et bouton mis à jour via le subscribe
 };
 
 function updateLiveToggleBtn(){
