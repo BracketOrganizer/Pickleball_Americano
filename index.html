@@ -246,6 +246,8 @@ window.enterLiveModeAndGo = async function(target){
   subscribeToResultsPublic();
   if(target === 'R'){
     setTimeout(()=>{ if(typeof toggleRules==='function') toggleRules(); }, 100);
+  } else if(target === 'P'){
+    setTimeout(()=>{ goTo(4); if(typeof showPlayerList==='function') showPlayerList(); }, 100);
   } else if(target === 5){
     setTimeout(()=>{ goTo(5); }, 100);
   } else {
@@ -3292,7 +3294,10 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           🏆 CLASSEMENT
         </button>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <button onclick="enterLiveModeAndGo('P')" style="padding:13px 6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#f0d8c0;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
+          👤 JOUEURS
+        </button>
         <button onclick="enterLiveModeAndGo('R')" style="padding:13px 6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#f0d8c0;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
           📋 RÈGLEMENT
         </button>
