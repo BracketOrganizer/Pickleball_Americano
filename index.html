@@ -250,6 +250,8 @@ window.enterLiveModeAndGo = async function(target){
     setTimeout(()=>{ goTo(4); if(typeof showPlayerList==='function') showPlayerList(); }, 100);
   } else if(target === 5){
     setTimeout(()=>{ goTo(5); }, 100);
+  } else if(target === 'TV'){
+    setTimeout(()=>{ goTo('TV'); }, 100);
   } else {
     setTimeout(()=>{ goTo(4); }, 100);
   }
