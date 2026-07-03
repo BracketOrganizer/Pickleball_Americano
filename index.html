@@ -223,15 +223,6 @@ window.loginGoogle = async function(){
   try { await signInWithPopup(auth, gProvider); }
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
-// Connexion depuis l'espace dédié "Responsable de club" (mêmes comptes Firebase Auth,
-// juste un point d'entrée séparé sur la page d'accueil)
-window.loginResponsable = async function(){
-  const email = document.getElementById('lr_email').value.trim();
-  const pwd   = document.getElementById('lr_pwd').value;
-  if(!email||!pwd){ showAuthMsg('Remplissez email et mot de passe.','red'); return; }
-  try { await signInWithEmailAndPassword(auth, email, pwd); }
-  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
-};
 
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
@@ -366,18 +357,26 @@ window.adminCreateUser = async function(){
 
 // ── Créer un compte RESPONSABLE DE CLUB ────────────────────
 // Formulaire dédié aux inscriptions en ligne — toujours rôle "responsable".
+// Le mot de passe n'est PAS saisi ici : c'est le mot de passe partagé
+// défini par l'admin dans les Réglages (même mot de passe pour tous les
+// responsables, ex. "Open27"). Seuls le nom, l'email et le club changent.
 window.adminCreateResponsable = async function(){
   const name  = document.getElementById('newR_name').value.trim();
   const email = document.getElementById('newR_email').value.trim();
-  const pwd   = document.getElementById('newR_pwd').value;
   const clubName = document.getElementById('newR_club').value.trim();
   const maxPlayers = +document.getElementById('newR_maxPlayers').value || 0;
   const msg   = document.getElementById('newRespMsg');
+  await loadRegistrationSettings(); // s'assurer d'avoir le mot de passe partagé à jour
+  const pwd = REG_SETTINGS.responsablePassword;
+  if(!pwd || pwd.length<6){
+    msg.textContent = '❌ Définissez d\'abord un mot de passe responsables (6 car. min) dans les réglages ci-dessous.';
+    msg.style.color = 'var(--red)';
+    return;
+  }
   const ok = await createAccountCore({ name, email, pwd, role:'responsable', clubName, maxPlayers }, msg);
   if(ok){
     document.getElementById('newR_name').value='';
     document.getElementById('newR_email').value='';
-    document.getElementById('newR_pwd').value='';
     document.getElementById('newR_club').value='';
     document.getElementById('newR_maxPlayers').value='4';
   }
@@ -386,7 +385,7 @@ window.adminCreateResponsable = async function(){
 // INSCRIPTIONS EN LIGNE — réglages, validation, espace responsable,
 // inscription publique par bouton
 // ══════════════════════════════════════════════════════════
-let REG_SETTINGS = { responsableEnabled:false, openEnabled:false, openMaxSlots:0, clubs:[] };
+let REG_SETTINGS = { responsableEnabled:false, openEnabled:false, openMaxSlots:0, clubs:[], responsablePassword:'' };
 let REG_PENDING  = [];
 let RESP_PROFILE = null;
 let RESP_REGS    = [];
@@ -400,7 +399,8 @@ async function loadRegistrationSettings(){
         responsableEnabled: !!d.responsableEnabled,
         openEnabled: !!d.openEnabled,
         openMaxSlots: +d.openMaxSlots || 0,
-        clubs: Array.isArray(d.clubs) ? d.clubs : []
+        clubs: Array.isArray(d.clubs) ? d.clubs : [],
+        responsablePassword: d.responsablePassword || ''
       };
     }
   } catch(e){ console.warn('loadRegistrationSettings', e); }
@@ -414,6 +414,7 @@ window.openAdminRegSettings = async function(){
   document.getElementById('regS_openEnabled').checked = REG_SETTINGS.openEnabled;
   document.getElementById('regS_openMax').value = REG_SETTINGS.openMaxSlots || 0;
   document.getElementById('regS_clubs').value = (REG_SETTINGS.clubs||[]).join('\n');
+  document.getElementById('regS_respPwd').value = REG_SETTINGS.responsablePassword || '';
   await loadPendingRegistrations();
 };
 
@@ -424,11 +425,16 @@ window.saveRegistrationSettings = async function(){
   const openEnabled = document.getElementById('regS_openEnabled').checked;
   const openMaxSlots = +document.getElementById('regS_openMax').value || 0;
   const clubs = document.getElementById('regS_clubs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const responsablePassword = document.getElementById('regS_respPwd').value.trim();
+  if(responsablePassword && responsablePassword.length<6){
+    if(msg){ msg.textContent='❌ Le mot de passe responsables doit faire 6 caractères minimum.'; msg.style.color='var(--red)'; }
+    return;
+  }
   try {
     await setDoc(doc(db,'settings','registration'),{
-      responsableEnabled, openEnabled, openMaxSlots, clubs, updatedAt: serverTimestamp()
+      responsableEnabled, openEnabled, openMaxSlots, clubs, responsablePassword, updatedAt: serverTimestamp()
     }, { merge:true });
-    REG_SETTINGS = { responsableEnabled, openEnabled, openMaxSlots, clubs };
+    REG_SETTINGS = { responsableEnabled, openEnabled, openMaxSlots, clubs, responsablePassword };
     if(msg){ msg.textContent='✅ Réglages enregistrés.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },3000); }
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
 };
@@ -574,37 +580,26 @@ window.respLogout = async function(){
   else showLogin();
 };
 
-// ── Visibilité des points d'entrée d'inscription (bouton public + espace responsable) ──
+// ── Visibilité du bouton d'inscription publique sur l'accueil ──
 async function refreshPublicRegUI(){
   const btn = document.getElementById('openRegBtn');
-  const respBox = document.getElementById('respLoginBox');
+  if(!btn) return;
   try {
     await loadRegistrationSettings();
-    // Bouton inscription publique — visible uniquement si activé par l'admin
-    if(btn){
-      if(!REG_SETTINGS.openEnabled){
-        btn.style.display='none';
-      } else {
-        const snap = await getDocs(collection(db,'americano_registrations'));
-        let used = 0;
-        snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
-        if(used >= REG_SETTINGS.openMaxSlots){
-          btn.style.display='';
-          btn.disabled = true;
-          btn.textContent = '📝 Inscriptions complètes';
-        } else {
-          btn.style.display='';
-          btn.disabled = false;
-          btn.textContent = '📝 S\'inscrire au tournoi';
-        }
-      }
+    if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
+    const snap = await getDocs(collection(db,'americano_registrations'));
+    let used = 0;
+    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
+    if(used >= REG_SETTINGS.openMaxSlots){
+      btn.style.display='';
+      btn.disabled = true;
+      btn.textContent = '📝 Inscriptions complètes';
+    } else {
+      btn.style.display='';
+      btn.disabled = false;
+      btn.textContent = '📝 S\'inscrire au tournoi';
     }
-    // Espace responsable de club — visible uniquement si activé par l'admin
-    if(respBox) respBox.style.display = REG_SETTINGS.responsableEnabled ? '' : 'none';
-  } catch(e){
-    if(btn) btn.style.display='none';
-    if(respBox) respBox.style.display='none';
-  }
+  } catch(e){ btn.style.display='none'; }
 }
 window.openPublicRegModal = function(){
   const sel = document.getElementById('openReg_club');
@@ -3633,26 +3628,14 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       </button>
     </div>
 
-    <!-- ══ ESPACE RESPONSABLE DE CLUB (visible seulement si activé par l'admin) ══ -->
-    <div id="respLoginBox" style="display:none;background:linear-gradient(135deg,#0d3020,#15602a);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid #30a050">
-      <div style="font-family:'Oswald',sans-serif;font-size:18px;font-weight:700;letter-spacing:1px;color:#c0ffd8;text-align:center;margin-bottom:4px;text-transform:uppercase">🏟️ Espace Responsable de Club</div>
-      <div style="font-size:12px;color:rgba(192,255,216,.75);text-align:center;margin-bottom:14px">Connectez-vous pour inscrire les joueurs de votre club</div>
-      <div class="login-form">
-        <div>
-          <label style="color:rgba(192,255,216,.75)">Email</label>
-          <input type="email" id="lr_email" placeholder="responsable@club.com" onkeydown="if(event.key==='Enter')loginResponsable()">
-        </div>
-        <div>
-          <label style="color:rgba(192,255,216,.75)">Mot de passe</label>
-          <input type="password" id="lr_pwd" placeholder="••••••••" onkeydown="if(event.key==='Enter')loginResponsable()">
-        </div>
-        <button class="btn btn-g" style="width:100%;justify-content:center" onclick="loginResponsable()">→ Se connecter</button>
-      </div>
-    </div>
-
-    <!-- ══ ZONE STAFF ══ -->
+    <!-- ══ ZONE STAFF & RESPONSABLES DE CLUB ══ -->
+    <!-- Un seul formulaire email/mot de passe : sert aux admins/scorers/spectateurs
+         ET aux responsables de club (mot de passe partagé défini par l'admin).
+         La redirection vers l'espace inscription ou l'appli se fait automatiquement
+         selon le rôle du compte, une fois connecté. -->
     <div style="background:var(--s2);border:2px solid var(--bdr2);border-radius:14px;padding:16px">
-      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;color:var(--ylw);text-align:center;margin-bottom:12px;text-transform:uppercase">🔑 Connexion Staff</div>
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;color:var(--ylw);text-align:center;margin-bottom:4px;text-transform:uppercase">🔑 Connexion Staff / Responsable de club</div>
+      <div style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:12px">Utilisez l'email et le mot de passe fournis par l'organisateur</div>
       <div class="login-form" id="tabLogin">
         <div>
           <label>Email</label>
@@ -3895,6 +3878,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <!-- Créer un compte responsable de club -->
         <div>
           <div class="admin-panel-ttl">🏟️ Créer un compte responsable de club</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">🔑 Tous les responsables partagent le même mot de passe, défini dans les réglages ci-contre. Seuls le nom, l'email et le club changent d'un compte à l'autre.</div>
           <div style="display:flex;flex-direction:column;gap:10px">
             <div>
               <label style="color:var(--muted)">Prénom / Nom du responsable</label>
@@ -3903,10 +3887,6 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
             <div>
               <label style="color:var(--muted)">Email</label>
               <input type="email" id="newR_email" placeholder="marie@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-            </div>
-            <div>
-              <label style="color:var(--muted)">Mot de passe (6 car. min)</label>
-              <input type="password" id="newR_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
             <div>
               <label style="color:var(--muted)">Nom du club</label>
@@ -3931,6 +3911,11 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
               <input type="checkbox" id="regS_respEnabled" style="width:18px;height:18px">
               Autoriser les responsables de club à inscrire des joueurs
             </label>
+            <div>
+              <label style="color:var(--muted)">Mot de passe partagé pour les responsables de club</label>
+              <input type="text" id="regS_respPwd" placeholder="ex : Open27 (6 car. min)" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">Ce mot de passe est utilisé automatiquement pour tous les nouveaux comptes responsables créés ci-contre. Communiquez-le aux responsables avec leur email. ⚠️ Le modifier ici ne change pas le mot de passe des comptes déjà créés.</div>
+            </div>
             <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer">
               <input type="checkbox" id="regS_openEnabled" style="width:18px;height:18px">
               Activer le bouton d'inscription publique (sans compte) sur la page d'accueil
