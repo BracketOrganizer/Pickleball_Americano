@@ -223,6 +223,15 @@ window.loginGoogle = async function(){
   try { await signInWithPopup(auth, gProvider); }
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
+// Connexion depuis l'espace dédié "Responsable de club" (mêmes comptes Firebase Auth,
+// juste un point d'entrée séparé sur la page d'accueil)
+window.loginResponsable = async function(){
+  const email = document.getElementById('lr_email').value.trim();
+  const pwd   = document.getElementById('lr_pwd').value;
+  if(!email||!pwd){ showAuthMsg('Remplissez email et mot de passe.','red'); return; }
+  try { await signInWithEmailAndPassword(auth, email, pwd); }
+  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
+};
 
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
@@ -565,26 +574,37 @@ window.respLogout = async function(){
   else showLogin();
 };
 
-// ── Inscription publique par bouton (sans compte) ──────────
+// ── Visibilité des points d'entrée d'inscription (bouton public + espace responsable) ──
 async function refreshPublicRegUI(){
   const btn = document.getElementById('openRegBtn');
-  if(!btn) return;
+  const respBox = document.getElementById('respLoginBox');
   try {
     await loadRegistrationSettings();
-    if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
-    const snap = await getDocs(collection(db,'americano_registrations'));
-    let used = 0;
-    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
-    if(used >= REG_SETTINGS.openMaxSlots){
-      btn.style.display='';
-      btn.disabled = true;
-      btn.textContent = '📝 Inscriptions complètes';
-    } else {
-      btn.style.display='';
-      btn.disabled = false;
-      btn.textContent = '📝 S\'inscrire au tournoi';
+    // Bouton inscription publique — visible uniquement si activé par l'admin
+    if(btn){
+      if(!REG_SETTINGS.openEnabled){
+        btn.style.display='none';
+      } else {
+        const snap = await getDocs(collection(db,'americano_registrations'));
+        let used = 0;
+        snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
+        if(used >= REG_SETTINGS.openMaxSlots){
+          btn.style.display='';
+          btn.disabled = true;
+          btn.textContent = '📝 Inscriptions complètes';
+        } else {
+          btn.style.display='';
+          btn.disabled = false;
+          btn.textContent = '📝 S\'inscrire au tournoi';
+        }
+      }
     }
-  } catch(e){ btn.style.display='none'; }
+    // Espace responsable de club — visible uniquement si activé par l'admin
+    if(respBox) respBox.style.display = REG_SETTINGS.responsableEnabled ? '' : 'none';
+  } catch(e){
+    if(btn) btn.style.display='none';
+    if(respBox) respBox.style.display='none';
+  }
 }
 window.openPublicRegModal = function(){
   const sel = document.getElementById('openReg_club');
@@ -3611,6 +3631,23 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       <button id="openRegBtn" onclick="openPublicRegModal()" style="display:none;width:100%;margin-top:10px;padding:14px 8px;background:linear-gradient(135deg,#0d3020,#15602a);border:2px solid #30a050;border-radius:10px;color:#c0ffd8;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;font-weight:700">
         📝 S'inscrire au tournoi
       </button>
+    </div>
+
+    <!-- ══ ESPACE RESPONSABLE DE CLUB (visible seulement si activé par l'admin) ══ -->
+    <div id="respLoginBox" style="display:none;background:linear-gradient(135deg,#0d3020,#15602a);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid #30a050">
+      <div style="font-family:'Oswald',sans-serif;font-size:18px;font-weight:700;letter-spacing:1px;color:#c0ffd8;text-align:center;margin-bottom:4px;text-transform:uppercase">🏟️ Espace Responsable de Club</div>
+      <div style="font-size:12px;color:rgba(192,255,216,.75);text-align:center;margin-bottom:14px">Connectez-vous pour inscrire les joueurs de votre club</div>
+      <div class="login-form">
+        <div>
+          <label style="color:rgba(192,255,216,.75)">Email</label>
+          <input type="email" id="lr_email" placeholder="responsable@club.com" onkeydown="if(event.key==='Enter')loginResponsable()">
+        </div>
+        <div>
+          <label style="color:rgba(192,255,216,.75)">Mot de passe</label>
+          <input type="password" id="lr_pwd" placeholder="••••••••" onkeydown="if(event.key==='Enter')loginResponsable()">
+        </div>
+        <button class="btn btn-g" style="width:100%;justify-content:center" onclick="loginResponsable()">→ Se connecter</button>
+      </div>
     </div>
 
     <!-- ══ ZONE STAFF ══ -->
