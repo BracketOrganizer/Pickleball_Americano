@@ -305,26 +305,15 @@ function subscribeToResultsPublic(){
   });
 }
 
-window.toggleNewUResponsableFields = function(){
-  const role = document.getElementById('newU_role').value;
-  const wrap = document.getElementById('newU_respFields');
-  if(wrap) wrap.style.display = (role==='responsable') ? 'flex' : 'none';
-};
-// ── Création de compte par l'admin (depuis page Config) ───
-window.adminCreateUser = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  const name  = document.getElementById('newU_name').value.trim();
-  const email = document.getElementById('newU_email').value.trim();
-  const pwd   = document.getElementById('newU_pwd').value;
-  const role  = document.getElementById('newU_role').value;
-  const msg   = document.getElementById('newUserMsg');
-  if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
-  if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
-  let clubName='', maxPlayers=0;
-  if(role==='responsable'){
-    clubName = document.getElementById('newU_club').value.trim();
-    maxPlayers = +document.getElementById('newU_maxPlayers').value || 0;
-    if(!clubName||maxPlayers<1){ msg.textContent='Club et quota (≥1) requis pour un responsable.'; msg.style.color='var(--red)'; return; }
+// ── Création de compte (racine partagée) ──────────────────
+// Utilisée par le formulaire "Gestion de l'application" (staff) et
+// le formulaire "Inscriptions en ligne" (responsable de club).
+async function createAccountCore({ name, email, pwd, role, clubName, maxPlayers }, msgEl){
+  if(!isAdmin()){ if(msgEl){ msgEl.textContent='Admin uniquement.'; msgEl.style.color='var(--red)'; } return false; }
+  if(!name||!email||!pwd){ msgEl.textContent='Tous les champs sont requis.'; msgEl.style.color='var(--red)'; return false; }
+  if(pwd.length<6){ msgEl.textContent='Mot de passe : 6 car. minimum.'; msgEl.style.color='var(--red)'; return false; }
+  if(role==='responsable' && (!clubName || !(maxPlayers>=1))){
+    msgEl.textContent='Club et quota (≥1) requis pour un responsable.'; msgEl.style.color='var(--red)'; return false;
   }
   try {
     // Créer l'utilisateur via la REST API Firebase Auth (sans déconnecter l'admin)
@@ -341,17 +330,47 @@ window.adminCreateUser = async function(){
     if(role==='responsable'){ userDoc.clubName = clubName; userDoc.maxPlayers = maxPlayers; }
     await setDoc(doc(db,'users',uid), userDoc);
     await auditLog('admin_create_user',{ uid, email, name, role });
-    msg.textContent=`✅ Compte créé : ${name} (${role})`; msg.style.color='var(--grn)';
+    msgEl.textContent=`✅ Compte créé : ${name} (${role})`; msgEl.style.color='var(--grn)';
+    setTimeout(()=>{ msgEl.textContent=''; },4000);
+    return true;
+  } catch(e){
+    msgEl.textContent='❌ '+e.message; msgEl.style.color='var(--red)';
+    return false;
+  }
+}
+
+// ── Créer un compte STAFF (admin / scorer / spectateur) ───
+// Formulaire dédié à la gestion de l'application — jamais de rôle "responsable" ici.
+window.adminCreateUser = async function(){
+  const name  = document.getElementById('newU_name').value.trim();
+  const email = document.getElementById('newU_email').value.trim();
+  const pwd   = document.getElementById('newU_pwd').value;
+  const role  = document.getElementById('newU_role').value;
+  const msg   = document.getElementById('newUserMsg');
+  const ok = await createAccountCore({ name, email, pwd, role }, msg);
+  if(ok){
     document.getElementById('newU_name').value='';
     document.getElementById('newU_email').value='';
     document.getElementById('newU_pwd').value='';
-    if(role==='responsable'){
-      document.getElementById('newU_club').value='';
-      document.getElementById('newU_maxPlayers').value='4';
-    }
-    setTimeout(()=>{ msg.textContent=''; },4000);
-  } catch(e){
-    msg.textContent='❌ '+e.message; msg.style.color='var(--red)';
+  }
+};
+
+// ── Créer un compte RESPONSABLE DE CLUB ────────────────────
+// Formulaire dédié aux inscriptions en ligne — toujours rôle "responsable".
+window.adminCreateResponsable = async function(){
+  const name  = document.getElementById('newR_name').value.trim();
+  const email = document.getElementById('newR_email').value.trim();
+  const pwd   = document.getElementById('newR_pwd').value;
+  const clubName = document.getElementById('newR_club').value.trim();
+  const maxPlayers = +document.getElementById('newR_maxPlayers').value || 0;
+  const msg   = document.getElementById('newRespMsg');
+  const ok = await createAccountCore({ name, email, pwd, role:'responsable', clubName, maxPlayers }, msg);
+  if(ok){
+    document.getElementById('newR_name').value='';
+    document.getElementById('newR_email').value='';
+    document.getElementById('newR_pwd').value='';
+    document.getElementById('newR_club').value='';
+    document.getElementById('newR_maxPlayers').value='4';
   }
 };
 // ══════════════════════════════════════════════════════════
@@ -471,6 +490,7 @@ window.showResponsableScreen = async function(){
   } catch(e){ RESP_PROFILE = { clubName:'Mon club', name:'', maxPlayers:0 }; }
   const nameEl = document.getElementById('respHdrName');
   if(nameEl) nameEl.textContent = '🏟️ ' + RESP_PROFILE.clubName;
+  await loadRegistrationSettings(); // pour connaître responsableEnabled à jour
   await loadResponsableRegs();
 };
 async function loadResponsableRegs(){
@@ -489,10 +509,13 @@ function renderResponsableScreen(){
   const quotaEl = document.getElementById('respQuota');
   const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
   if(quotaEl) quotaEl.textContent = `${used} / ${max} inscription${max>1?'s':''}`;
+  const closedEl = document.getElementById('respClosedMsg');
+  const regsClosed = !REG_SETTINGS.responsableEnabled;
+  if(closedEl) closedEl.style.display = regsClosed ? '' : 'none';
   const formWrap = document.getElementById('respAddForm');
-  if(formWrap) formWrap.style.display = (used < max) ? '' : 'none';
+  if(formWrap) formWrap.style.display = (!regsClosed && used < max) ? '' : 'none';
   const fullMsg = document.getElementById('respQuotaFullMsg');
-  if(fullMsg) fullMsg.style.display = (used >= max) ? '' : 'none';
+  if(fullMsg) fullMsg.style.display = (!regsClosed && used >= max) ? '' : 'none';
   const listEl = document.getElementById('respRegsList');
   if(!listEl) return;
   if(RESP_REGS.length===0){
@@ -514,6 +537,7 @@ function renderResponsableScreen(){
 }
 window.respAddPlayer = async function(){
   if(!isResponsable()) return;
+  if(!REG_SETTINGS.responsableEnabled){ alert('Les inscriptions sont actuellement fermées par l\'organisateur.'); return; }
   const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
   if(used >= max){ alert('Quota d\'inscriptions atteint pour votre club.'); return; }
   const name = document.getElementById('resp_p_name').value.trim();
@@ -563,17 +587,35 @@ async function refreshPublicRegUI(){
   } catch(e){ btn.style.display='none'; }
 }
 window.openPublicRegModal = function(){
-  const dl = document.getElementById('openReg_clubList');
-  if(dl) dl.innerHTML = (REG_SETTINGS.clubs||[]).map(c=>`<option value="${c.replace(/"/g,'&quot;')}">`).join('');
+  const sel = document.getElementById('openReg_club');
+  if(sel){
+    sel.innerHTML = '<option value="">— Choisissez votre club —</option>'
+      + (REG_SETTINGS.clubs||[]).map(c=>`<option value="${c.replace(/"/g,'&quot;')}">${c}</option>`).join('')
+      + '<option value="__other__">Autre (préciser)</option>';
+  }
+  const otherEl = document.getElementById('openReg_club_other');
+  if(otherEl){ otherEl.style.display='none'; otherEl.value=''; }
   document.getElementById('openReg_name').value='';
-  document.getElementById('openReg_club').value='';
   document.getElementById('openRegMsg').textContent='';
   document.getElementById('openRegModal').classList.add('open');
 };
+window.toggleOpenRegClubOther = function(){
+  const sel = document.getElementById('openReg_club');
+  const otherEl = document.getElementById('openReg_club_other');
+  if(!sel || !otherEl) return;
+  otherEl.style.display = (sel.value === '__other__') ? '' : 'none';
+  if(sel.value === '__other__') otherEl.focus();
+};
+function getOpenRegClubValue(){
+  const sel = document.getElementById('openReg_club');
+  if(!sel) return '';
+  if(sel.value === '__other__') return document.getElementById('openReg_club_other').value.trim();
+  return sel.value;
+}
 window.closeOpenRegModal = function(){ document.getElementById('openRegModal').classList.remove('open'); };
 window.submitOpenRegistration = async function(){
   const name = document.getElementById('openReg_name').value.trim();
-  const club = document.getElementById('openReg_club').value.trim();
+  const club = getOpenRegClubValue();
   const msg = document.getElementById('openRegMsg');
   if(!name||!club){ msg.textContent='Nom, prénom et club sont obligatoires.'; msg.style.color='var(--red)'; return; }
   try {
@@ -3603,6 +3645,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     </div>
     <div style="background:var(--s2);border:1px solid var(--bdr2);border-radius:14px;padding:18px;margin-bottom:18px">
       <div id="respQuota" style="font-weight:700;color:var(--ink);margin-bottom:14px">0 / 0 inscription</div>
+      <div id="respClosedMsg" style="display:none;color:#e6a23c;background:rgba(230,162,60,.12);border:1px solid #e6a23c;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:10px">⏸️ Les inscriptions sont actuellement fermées par l'organisateur. Vous pourrez inscrire vos joueurs dès leur réouverture.</div>
       <div id="respAddForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <input type="text" id="resp_p_name" placeholder="Nom et prénom du joueur" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')respAddPlayer()">
         <button class="btn btn-g btn-sm" onclick="respAddPlayer()">✓ Inscrire</button>
@@ -3625,8 +3668,11 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       </div>
       <div>
         <label style="color:rgba(255,255,255,.5)">Club</label>
-        <input type="text" id="openReg_club" list="openReg_clubList" placeholder="Tapez ou choisissez votre club">
-        <datalist id="openReg_clubList"></datalist>
+        <select id="openReg_club" onchange="toggleOpenRegClubOther()">
+          <option value="">— Choisissez votre club —</option>
+          <option value="__other__">Autre (préciser)</option>
+        </select>
+        <input type="text" id="openReg_club_other" placeholder="Nom de votre club" style="display:none;margin-top:8px">
       </div>
       <div id="openRegMsg" style="font-size:13px;min-height:18px"></div>
       <div style="display:flex;gap:10px">
@@ -3704,144 +3750,181 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
 <!-- PANNEAU ADMIN -->
 <div id="adminPanel" style="display:none">
   <div class="admin-panel">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;max-width:960px">
 
-      <!-- Créer un compte -->
-      <div>
-        <div class="admin-panel-ttl">➕ Créer un compte utilisateur</div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <div>
-            <label style="color:var(--muted)">Prénom / Nom</label>
-            <input type="text" id="newU_name" placeholder="Marie Dupont" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-          </div>
-          <div>
-            <label style="color:var(--muted)">Email</label>
-            <input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-          </div>
-          <div>
-            <label style="color:var(--muted)">Mot de passe (6 car. min)</label>
-            <input type="password" id="newU_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-          </div>
-          <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1">
-              <label style="color:var(--muted)">Rôle</label>
-              <select id="newU_role" onchange="toggleNewUResponsableFields()" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-                <option value="scorer">✏️ Scorer</option>
-                <option value="spectator">👁 Spectateur</option>
-                <option value="responsable">🏟️ Responsable club (inscription joueurs)</option>
-                <option value="admin">👑 Admin</option>
-              </select>
+    <!-- ══════════════════════════════════════════════════ -->
+    <!-- SECTION 1 — GESTION DE L'APPLICATION (staff)        -->
+    <!-- ══════════════════════════════════════════════════ -->
+    <div style="border:2px solid #80c8ff;border-radius:14px;padding:16px;margin-bottom:22px;background:rgba(128,200,255,.05)">
+      <div style="font-family:'Oswald',sans-serif;font-size:17px;font-weight:700;letter-spacing:.8px;color:#80c8ff;text-transform:uppercase;margin-bottom:14px;display:flex;align-items:center;gap:8px">🔧 Gestion de l'application</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">Comptes pour les personnes qui font tourner le tournoi : admins, scorers et spectateurs. Pour les responsables de club et les inscriptions joueurs, voir la section « Inscriptions en ligne » ci-dessous.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;max-width:960px">
+
+        <!-- Créer un compte staff -->
+        <div>
+          <div class="admin-panel-ttl">➕ Créer un compte staff</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div>
+              <label style="color:var(--muted)">Prénom / Nom</label>
+              <input type="text" id="newU_name" placeholder="Marie Dupont" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
-            <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
+            <div>
+              <label style="color:var(--muted)">Email</label>
+              <input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div>
+              <label style="color:var(--muted)">Mot de passe (6 car. min)</label>
+              <input type="password" id="newU_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end">
+              <div style="flex:1">
+                <label style="color:var(--muted)">Rôle</label>
+                <select id="newU_role" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+                  <option value="scorer">✏️ Scorer</option>
+                  <option value="spectator">👁 Spectateur</option>
+                  <option value="admin">👑 Admin</option>
+                </select>
+              </div>
+              <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
+            </div>
+            <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
           </div>
-          <div id="newU_respFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
+        </div>
+
+        <!-- Changer le rôle d'un compte existant -->
+        <div>
+          <div class="admin-panel-ttl">🔑 Modifier le rôle d'un compte</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div>
+              <label style="color:var(--muted)">UID de l'utilisateur</label>
+              <input type="text" id="adminUidInput" placeholder="Firebase Auth → Users → User UID" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end">
+              <div style="flex:1">
+                <label style="color:var(--muted)">Nouveau rôle</label>
+                <select id="adminRoleSelect" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+                  <option value="admin">👑 Admin</option>
+                  <option value="scorer" selected>✏️ Scorer</option>
+                  <option value="spectator">👁 Spectateur</option>
+                </select>
+              </div>
+              <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
+            </div>
+            <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6">
+              💡 <strong style="color:#ffd080">Admin</strong> = tout ·
+              <strong style="color:#80c8ff">Scorer</strong> = scores + noms ·
+              <strong style="color:var(--muted)">Spectateur</strong> = lecture seule
+            </div>
+          </div>
+        </div>
+
+        <!-- Liste des utilisateurs inscrits -->
+        <div style="grid-column:1/-1;margin-top:6px;border-top:1px solid var(--bdr);padding-top:16px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <div class="admin-panel-ttl" style="margin-bottom:0">👥 Comptes existants (staff + responsables)</div>
+            <button onclick="loadUserList()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Rafraîchir</button>
+          </div>
+          <div id="userListMsg" style="font-size:13px;min-height:18px;margin-bottom:8px"></div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;min-width:480px">
+              <thead>
+                <tr style="border-bottom:1px solid var(--bdr2)">
+                  <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Nom</th>
+                  <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Email</th>
+                  <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Rôle</th>
+                  <th style="padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Action</th>
+                </tr>
+              </thead>
+              <tbody id="userListBody">
+                <tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════ -->
+    <!-- SECTION 2 — INSCRIPTIONS EN LIGNE (joueurs/clubs)   -->
+    <!-- ══════════════════════════════════════════════════ -->
+    <div style="border:2px solid #30a050;border-radius:14px;padding:16px;background:rgba(48,160,80,.05)">
+      <div style="font-family:'Oswald',sans-serif;font-size:17px;font-weight:700;letter-spacing:.8px;color:#5fd88a;text-transform:uppercase;margin-bottom:14px;display:flex;align-items:center;gap:8px">📋 Inscriptions en ligne</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">Tout ce qui concerne l'inscription des joueurs avant le tournoi : comptes responsables de club, bouton d'inscription publique, et validation des demandes.</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px">
+
+        <!-- Créer un compte responsable de club -->
+        <div>
+          <div class="admin-panel-ttl">🏟️ Créer un compte responsable de club</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div>
+              <label style="color:var(--muted)">Prénom / Nom du responsable</label>
+              <input type="text" id="newR_name" placeholder="Marie Dupont" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div>
+              <label style="color:var(--muted)">Email</label>
+              <input type="email" id="newR_email" placeholder="marie@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div>
+              <label style="color:var(--muted)">Mot de passe (6 car. min)</label>
+              <input type="password" id="newR_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
             <div>
               <label style="color:var(--muted)">Nom du club</label>
-              <input type="text" id="newU_club" placeholder="Pickleball Club de..." style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+              <input type="text" id="newR_club" placeholder="Pickleball Club de..." style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
             <div>
               <label style="color:var(--muted)">Quota d'inscriptions autorisées</label>
-              <input type="number" id="newU_maxPlayers" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+              <input type="number" id="newR_maxPlayers" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
+            <button class="btn btn-g btn-sm" onclick="adminCreateResponsable()">✓ Créer le compte responsable</button>
+            <div id="newRespMsg" style="font-size:13px;min-height:18px"></div>
           </div>
-          <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
         </div>
-      </div>
 
-      <!-- Changer le rôle d'un compte existant -->
-      <div>
-        <div class="admin-panel-ttl">🔑 Modifier le rôle d'un compte</div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <div>
-            <label style="color:var(--muted)">UID de l'utilisateur</label>
-            <input type="text" id="adminUidInput" placeholder="Firebase Auth → Users → User UID" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+        <!-- Réglages inscriptions en ligne -->
+        <div>
+          <div class="admin-panel-ttl" style="display:flex;align-items:center;gap:12px">⚙️ Réglages
+            <button onclick="openAdminRegSettings()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
           </div>
-          <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1">
-              <label style="color:var(--muted)">Nouveau rôle</label>
-              <select id="adminRoleSelect" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
-                <option value="admin">👑 Admin</option>
-                <option value="scorer" selected>✏️ Scorer</option>
-                <option value="spectator">👁 Spectateur</option>
-              </select>
-            </div>
-            <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
-          </div>
-          <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">
-            💡 <strong style="color:#ffd080">Admin</strong> = tout ·
-            <strong style="color:#80c8ff">Scorer</strong> = scores + noms ·
-            <strong style="color:var(--muted)">Spectateur</strong> = lecture seule
-          </div>
-        </div>
-      </div>
-
-      <!-- Liste des utilisateurs inscrits -->
-      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div class="admin-panel-ttl" style="margin-bottom:0">👥 Utilisateurs inscrits</div>
-          <button onclick="loadUserList()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Rafraîchir</button>
-        </div>
-        <div id="userListMsg" style="font-size:13px;min-height:18px;margin-bottom:8px"></div>
-        <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;min-width:480px">
-            <thead>
-              <tr style="border-bottom:1px solid var(--bdr2)">
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Nom</th>
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Email</th>
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Rôle</th>
-                <th style="padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Action</th>
-              </tr>
-            </thead>
-            <tbody id="userListBody">
-              <tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
-      </div>
-
-      <!-- Réglages inscriptions en ligne -->
-      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div class="admin-panel-ttl" style="margin-bottom:0">📋 Inscriptions en ligne</div>
-          <button onclick="openAdminRegSettings()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
           <div style="display:flex;flex-direction:column;gap:10px">
             <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer">
               <input type="checkbox" id="regS_respEnabled" style="width:18px;height:18px">
-              Activer l'inscription par responsables de club (quota individuel par compte)
+              Autoriser les responsables de club à inscrire des joueurs
             </label>
             <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer">
               <input type="checkbox" id="regS_openEnabled" style="width:18px;height:18px">
-              Activer le bouton d'inscription publique (sans compte)
+              Activer le bouton d'inscription publique (sans compte) sur la page d'accueil
             </label>
             <div>
               <label style="color:var(--muted)">Nombre max d'inscriptions publiques (quota séparé)</label>
               <input type="number" id="regS_openMax" min="0" value="0" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
+            <div>
+              <label style="color:var(--muted)">Liste des clubs proposés (un par ligne)</label>
+              <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#fff;border:1px solid var(--bdr2);color:var(--ink);border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <button class="btn btn-g btn-sm" onclick="saveRegistrationSettings()">✓ Enregistrer les réglages</button>
+              <div id="regSettingsMsg" style="font-size:13px"></div>
+            </div>
           </div>
-          <div>
-            <label style="color:var(--muted)">Liste des clubs proposés (un par ligne, la personne peut aussi taper un autre nom)</label>
-            <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#fff;border:1px solid var(--bdr2);color:var(--ink);border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;margin-top:10px">
-          <button class="btn btn-g btn-sm" onclick="saveRegistrationSettings()">✓ Enregistrer les réglages</button>
-          <div id="regSettingsMsg" style="font-size:13px"></div>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
-          💡 Les <strong style="color:#ffd080">responsables de club</strong> se créent comme un compte utilisateur ci-dessus (rôle « Responsable club ») avec leur propre quota. Le <strong style="color:#80c8ff">bouton public</strong> utilise un quota global séparé défini ici. Vous pouvez activer l'un, l'autre, ou les deux en même temps.
         </div>
 
-        <div style="margin-top:20px">
-          <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
-          <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
-        </div>
       </div>
 
+      <div style="font-size:11px;color:var(--muted);margin-top:14px;line-height:1.6;border-top:1px solid var(--bdr);padding-top:12px">
+        💡 <strong style="color:#5fd88a">Responsables de club</strong> : créés dans le formulaire ci-dessus, chacun a son propre quota. Décochez la case pour <strong style="color:#e6a23c">arrêter temporairement</strong> les nouvelles inscriptions des responsables sans supprimer leurs comptes. <strong style="color:#80c8ff">Bouton public</strong> : n'apparaît sur la page d'accueil que si vous l'activez ici, et utilise un quota global séparé.
+      </div>
+
+      <div style="margin-top:20px">
+        <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
+        <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
+      </div>
     </div>
+
   </div>
 </div>
 
