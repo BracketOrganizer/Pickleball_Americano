@@ -25,8 +25,8 @@ import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
          createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
-         addDoc, updateDoc, serverTimestamp, query, orderBy }
+import { getFirestore, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection,
+         addDoc, updateDoc, serverTimestamp, query, orderBy, where }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -78,6 +78,7 @@ const ST = {
 // ─── Helpers rôle ───────────────────────────────────────
 function isAdmin()  { return USER_ROLE === 'admin'; }
 function isScorer() { return USER_ROLE === 'admin' || USER_ROLE === 'scorer'; }
+function isResponsable() { return USER_ROLE === 'responsable'; }
 // Live bloqué = spectateur ET liveOpen pas encore true
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
@@ -168,6 +169,11 @@ onAuthStateChanged(auth, async (user)=>{
     CURRENT_USER = user;
     await ensureUserDoc(user);
     USER_ROLE = await getUserRole(user.uid);
+    // Responsable club : écran dédié d'inscription, pas d'accès à l'appli tournoi
+    if(USER_ROLE === 'responsable'){
+      await showResponsableScreen();
+      return;
+    }
     // Spectateur : bloquer si le live n'est pas ouvert
     if(USER_ROLE === 'spectator'){
       try {
@@ -299,6 +305,11 @@ function subscribeToResultsPublic(){
   });
 }
 
+window.toggleNewUResponsableFields = function(){
+  const role = document.getElementById('newU_role').value;
+  const wrap = document.getElementById('newU_respFields');
+  if(wrap) wrap.style.display = (role==='responsable') ? 'flex' : 'none';
+};
 // ── Création de compte par l'admin (depuis page Config) ───
 window.adminCreateUser = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
@@ -309,6 +320,12 @@ window.adminCreateUser = async function(){
   const msg   = document.getElementById('newUserMsg');
   if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
+  let clubName='', maxPlayers=0;
+  if(role==='responsable'){
+    clubName = document.getElementById('newU_club').value.trim();
+    maxPlayers = +document.getElementById('newU_maxPlayers').value || 0;
+    if(!clubName||maxPlayers<1){ msg.textContent='Club et quota (≥1) requis pour un responsable.'; msg.style.color='var(--red)'; return; }
+  }
   try {
     // Créer l'utilisateur via la REST API Firebase Auth (sans déconnecter l'admin)
     const res = await fetch(
@@ -320,19 +337,258 @@ window.adminCreateUser = async function(){
     if(data.error){ throw new Error(data.error.message); }
     const uid = data.localId;
     // Créer le doc Firestore
-    await setDoc(doc(db,'users',uid),{
-      email, name, role, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid
-    });
+    const userDoc = { email, name, role, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid };
+    if(role==='responsable'){ userDoc.clubName = clubName; userDoc.maxPlayers = maxPlayers; }
+    await setDoc(doc(db,'users',uid), userDoc);
     await auditLog('admin_create_user',{ uid, email, name, role });
     msg.textContent=`✅ Compte créé : ${name} (${role})`; msg.style.color='var(--grn)';
     document.getElementById('newU_name').value='';
     document.getElementById('newU_email').value='';
     document.getElementById('newU_pwd').value='';
+    if(role==='responsable'){
+      document.getElementById('newU_club').value='';
+      document.getElementById('newU_maxPlayers').value='4';
+    }
     setTimeout(()=>{ msg.textContent=''; },4000);
   } catch(e){
     msg.textContent='❌ '+e.message; msg.style.color='var(--red)';
   }
 };
+// ══════════════════════════════════════════════════════════
+// INSCRIPTIONS EN LIGNE — réglages, validation, espace responsable,
+// inscription publique par bouton
+// ══════════════════════════════════════════════════════════
+let REG_SETTINGS = { responsableEnabled:false, openEnabled:false, openMaxSlots:0, clubs:[] };
+let REG_PENDING  = [];
+let RESP_PROFILE = null;
+let RESP_REGS    = [];
+
+async function loadRegistrationSettings(){
+  try {
+    const snap = await getDoc(doc(db,'settings','registration'));
+    if(snap.exists()){
+      const d = snap.data();
+      REG_SETTINGS = {
+        responsableEnabled: !!d.responsableEnabled,
+        openEnabled: !!d.openEnabled,
+        openMaxSlots: +d.openMaxSlots || 0,
+        clubs: Array.isArray(d.clubs) ? d.clubs : []
+      };
+    }
+  } catch(e){ console.warn('loadRegistrationSettings', e); }
+  return REG_SETTINGS;
+}
+
+window.openAdminRegSettings = async function(){
+  if(!isAdmin()) return;
+  await loadRegistrationSettings();
+  document.getElementById('regS_respEnabled').checked = REG_SETTINGS.responsableEnabled;
+  document.getElementById('regS_openEnabled').checked = REG_SETTINGS.openEnabled;
+  document.getElementById('regS_openMax').value = REG_SETTINGS.openMaxSlots || 0;
+  document.getElementById('regS_clubs').value = (REG_SETTINGS.clubs||[]).join('\n');
+  await loadPendingRegistrations();
+};
+
+window.saveRegistrationSettings = async function(){
+  if(!isAdmin()) return;
+  const msg = document.getElementById('regSettingsMsg');
+  const responsableEnabled = document.getElementById('regS_respEnabled').checked;
+  const openEnabled = document.getElementById('regS_openEnabled').checked;
+  const openMaxSlots = +document.getElementById('regS_openMax').value || 0;
+  const clubs = document.getElementById('regS_clubs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  try {
+    await setDoc(doc(db,'settings','registration'),{
+      responsableEnabled, openEnabled, openMaxSlots, clubs, updatedAt: serverTimestamp()
+    }, { merge:true });
+    REG_SETTINGS = { responsableEnabled, openEnabled, openMaxSlots, clubs };
+    if(msg){ msg.textContent='✅ Réglages enregistrés.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },3000); }
+  } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+};
+
+// ── Liste des inscriptions en attente (admin) ─────────────
+window.loadPendingRegistrations = async function(){
+  if(!isAdmin()) return;
+  const listEl = document.getElementById('regPendingList');
+  if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:13px">Chargement…</div>';
+  try {
+    const snap = await getDocs(collection(db,'americano_registrations'));
+    REG_PENDING = [];
+    snap.forEach(d=>{ const r=d.data(); if(r.status==='pending') REG_PENDING.push({ id:d.id, ...r }); });
+    REG_PENDING.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
+  } catch(e){ REG_PENDING = []; }
+  renderPendingRegistrations();
+};
+function renderPendingRegistrations(){
+  const listEl = document.getElementById('regPendingList');
+  if(!listEl) return;
+  if(REG_PENDING.length===0){
+    listEl.innerHTML = '<div style="color:rgba(255,255,255,.35);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>';
+    return;
+  }
+  listEl.innerHTML = REG_PENDING.map(r=>{
+    const origin = r.source==='responsable' ? `🏟️ ${r.responsableName||'Responsable'}` : '📝 Inscription libre';
+    return `<div style="border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:700;color:#fff">${(r.name||'—')}</div>
+        <div style="color:rgba(255,255,255,.5);font-size:12px">${r.club||'—'} · ${origin}</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-g btn-sm" onclick="validateRegistration('${r.id}')">✓ Valider</button>
+        <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+window.validateRegistration = async function(id){
+  if(!isAdmin()) return;
+  const reg = REG_PENDING.find(r=>r.id===id);
+  if(!reg) return;
+  ST.players.push({ id:'p'+Date.now()+Math.random(), name:reg.name, lv:3, g:'', club:reg.club||'' });
+  try {
+    await saveTournament({ players: ST.players });
+    await updateDoc(doc(db,'americano_registrations',id),{ status:'imported' });
+    await loadPendingRegistrations();
+    if(ST.page===2) renderPlayers();
+  } catch(e){ alert('Erreur : '+e.message); }
+};
+window.rejectRegistration = async function(id){
+  if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
+  try { await deleteDoc(doc(db,'americano_registrations',id)); await loadPendingRegistrations(); }
+  catch(e){ alert('Erreur : '+e.message); }
+};
+
+// ── Espace responsable club ────────────────────────────────
+window.showResponsableScreen = async function(){
+  document.getElementById('loginScreen').style.display='none';
+  document.getElementById('appScreen').style.display='none';
+  const rs=document.getElementById('responsableScreen');
+  if(rs) rs.style.display='block';
+  try {
+    const snap = await getDoc(doc(db,'users',CURRENT_USER.uid));
+    RESP_PROFILE = snap.exists()
+      ? { clubName: snap.data().clubName||snap.data().name||'Mon club', name: snap.data().name||'', maxPlayers: snap.data().maxPlayers||0 }
+      : { clubName:'Mon club', name:'', maxPlayers:0 };
+  } catch(e){ RESP_PROFILE = { clubName:'Mon club', name:'', maxPlayers:0 }; }
+  const nameEl = document.getElementById('respHdrName');
+  if(nameEl) nameEl.textContent = '🏟️ ' + RESP_PROFILE.clubName;
+  await loadResponsableRegs();
+};
+async function loadResponsableRegs(){
+  const listEl = document.getElementById('respRegsList');
+  if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
+  try {
+    const q = query(collection(db,'americano_registrations'), where('responsableUid','==',CURRENT_USER.uid));
+    const snap = await getDocs(q);
+    RESP_REGS = [];
+    snap.forEach(d=> RESP_REGS.push({ id:d.id, ...d.data() }));
+    RESP_REGS.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
+  } catch(e){ RESP_REGS = []; }
+  renderResponsableScreen();
+}
+function renderResponsableScreen(){
+  const quotaEl = document.getElementById('respQuota');
+  const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
+  if(quotaEl) quotaEl.textContent = `${used} / ${max} inscription${max>1?'s':''}`;
+  const formWrap = document.getElementById('respAddForm');
+  if(formWrap) formWrap.style.display = (used < max) ? '' : 'none';
+  const fullMsg = document.getElementById('respQuotaFullMsg');
+  if(fullMsg) fullMsg.style.display = (used >= max) ? '' : 'none';
+  const listEl = document.getElementById('respRegsList');
+  if(!listEl) return;
+  if(RESP_REGS.length===0){
+    listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:14px">Aucun joueur inscrit pour l\'instant.</div>';
+    return;
+  }
+  listEl.innerHTML = RESP_REGS.map(r=>{
+    const badge = r.status==='imported'
+      ? '<span style="color:var(--grn);font-size:12px;font-weight:700">✅ Validée — intégrée au tournoi</span>'
+      : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>';
+    return `<div style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:700">${r.name||'—'}</div>
+        <div style="margin-top:4px">${badge}</div>
+      </div>
+      ${r.status==='imported' ? '' : `<button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="respDeleteReg('${r.id}')">🗑 Supprimer</button>`}
+    </div>`;
+  }).join('');
+}
+window.respAddPlayer = async function(){
+  if(!isResponsable()) return;
+  const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
+  if(used >= max){ alert('Quota d\'inscriptions atteint pour votre club.'); return; }
+  const name = document.getElementById('resp_p_name').value.trim();
+  const msg = document.getElementById('respAddMsg');
+  if(!name){ if(msg){ msg.textContent='Le nom et prénom du joueur sont obligatoires.'; msg.style.color='var(--red)'; } return; }
+  try {
+    await addDoc(collection(db,'americano_registrations'),{
+      source:'responsable', responsableUid: CURRENT_USER.uid, responsableName: RESP_PROFILE.clubName,
+      club: RESP_PROFILE.clubName, name, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+    });
+    document.getElementById('resp_p_name').value='';
+    if(msg){ msg.textContent='✅ Joueur inscrit, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
+    await loadResponsableRegs();
+  } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+};
+window.respDeleteReg = async function(id){
+  if(!confirm('Supprimer cette inscription ?')) return;
+  try { await deleteDoc(doc(db,'americano_registrations',id)); await loadResponsableRegs(); }
+  catch(e){ alert('Erreur : '+e.message); }
+};
+window.respLogout = async function(){
+  RESP_PROFILE = null; RESP_REGS = [];
+  USER_ROLE = null; CURRENT_USER = null;
+  if(auth.currentUser) await signOut(auth);
+  else showLogin();
+};
+
+// ── Inscription publique par bouton (sans compte) ──────────
+async function refreshPublicRegUI(){
+  const btn = document.getElementById('openRegBtn');
+  if(!btn) return;
+  try {
+    await loadRegistrationSettings();
+    if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
+    const snap = await getDocs(collection(db,'americano_registrations'));
+    let used = 0;
+    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
+    if(used >= REG_SETTINGS.openMaxSlots){
+      btn.style.display='';
+      btn.disabled = true;
+      btn.textContent = '📝 Inscriptions complètes';
+    } else {
+      btn.style.display='';
+      btn.disabled = false;
+      btn.textContent = '📝 S\'inscrire au tournoi';
+    }
+  } catch(e){ btn.style.display='none'; }
+}
+window.openPublicRegModal = function(){
+  const dl = document.getElementById('openReg_clubList');
+  if(dl) dl.innerHTML = (REG_SETTINGS.clubs||[]).map(c=>`<option value="${c.replace(/"/g,'&quot;')}">`).join('');
+  document.getElementById('openReg_name').value='';
+  document.getElementById('openReg_club').value='';
+  document.getElementById('openRegMsg').textContent='';
+  document.getElementById('openRegModal').classList.add('open');
+};
+window.closeOpenRegModal = function(){ document.getElementById('openRegModal').classList.remove('open'); };
+window.submitOpenRegistration = async function(){
+  const name = document.getElementById('openReg_name').value.trim();
+  const club = document.getElementById('openReg_club').value.trim();
+  const msg = document.getElementById('openRegMsg');
+  if(!name||!club){ msg.textContent='Nom, prénom et club sont obligatoires.'; msg.style.color='var(--red)'; return; }
+  try {
+    const snap = await getDocs(collection(db,'americano_registrations'));
+    let used = 0;
+    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
+    if(used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
+    await addDoc(collection(db,'americano_registrations'),{
+      source:'open', name, club, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+    });
+    msg.textContent='✅ Inscription envoyée, en attente de validation par l\'organisateur !'; msg.style.color='var(--grn)';
+    setTimeout(()=>{ closeOpenRegModal(); refreshPublicRegUI(); }, 1800);
+  } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
+};
+
 function authErrMsg(code){
   const map={
     'auth/wrong-password':'Mot de passe incorrect.',
@@ -358,6 +614,9 @@ function showAuthMsg(msg,color){
 function showLogin(){
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('appScreen').style.display='none';
+  const rs=document.getElementById('responsableScreen');
+  if(rs) rs.style.display='none';
+  refreshPublicRegUI();
 }
 function showApp(){
   document.getElementById('loginScreen').style.display='none';
@@ -365,7 +624,7 @@ function showApp(){
   applyRoleUI();
 }
 function roleBadge(role){
-  const map={admin:'👑 Admin',scorer:'✏️ Scorer',spectator:'👁 Spectateur'};
+  const map={admin:'👑 Admin',scorer:'✏️ Scorer',spectator:'👁 Spectateur',responsable:'🏟️ Responsable club'};
   return map[role]||role;
 }
 function applyRoleUI(){
@@ -429,7 +688,7 @@ window.loadUserList = async function(){
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
       const isMe = CURRENT_USER && uid===CURRENT_USER.uid;
-      const roleIcon={admin:'👑',scorer:'✏️',spectator:'👁'}[u.role]||'?';
+      const roleIcon={admin:'👑',scorer:'✏️',spectator:'👁',responsable:'🏟️'}[u.role]||'?';
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid rgba(255,255,255,.08);font-size:13px';
       tr.innerHTML=`
@@ -3307,6 +3566,9 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           📺 ÉCRAN
         </button>
       </div>
+      <button id="openRegBtn" onclick="openPublicRegModal()" style="display:none;width:100%;margin-top:10px;padding:14px 8px;background:linear-gradient(135deg,#0d3020,#15602a);border:2px solid #30a050;border-radius:10px;color:#c0ffd8;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;font-weight:700">
+        📝 S'inscrire au tournoi
+      </button>
     </div>
 
     <!-- ══ ZONE STAFF ══ -->
@@ -3327,6 +3589,49 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg>
           Continuer avec Google
         </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ESPACE RESPONSABLE CLUB -->
+<div id="responsableScreen" style="display:none;min-height:100vh;padding:24px 16px;background:var(--s0)">
+  <div style="max-width:560px;margin:0 auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div id="respHdrName" style="font-family:'Oswald',sans-serif;font-size:20px;font-weight:700;color:var(--ylw);letter-spacing:.6px">🏟️ Mon club</div>
+      <button class="btn btn-ghost btn-sm" onclick="respLogout()">⏻ Déconnexion</button>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bdr2);border-radius:14px;padding:18px;margin-bottom:18px">
+      <div id="respQuota" style="font-weight:700;color:#fff;margin-bottom:14px">0 / 0 inscription</div>
+      <div id="respAddForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <input type="text" id="resp_p_name" placeholder="Nom et prénom du joueur" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')respAddPlayer()">
+        <button class="btn btn-g btn-sm" onclick="respAddPlayer()">✓ Inscrire</button>
+      </div>
+      <div id="respQuotaFullMsg" style="display:none;color:#e6a23c;font-size:13px;margin-bottom:8px">⚠️ Quota d'inscriptions atteint pour votre club.</div>
+      <div id="respAddMsg" style="font-size:13px;min-height:18px"></div>
+    </div>
+    <div id="respRegsList"></div>
+  </div>
+</div>
+
+<!-- MODALE INSCRIPTION PUBLIQUE -->
+<div class="modal-bg" id="openRegModal">
+  <div class="modal">
+    <div class="modal-ttl">📝 Inscription au tournoi</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label style="color:rgba(255,255,255,.5)">Nom et prénom</label>
+        <input type="text" id="openReg_name" placeholder="Marie Dupont">
+      </div>
+      <div>
+        <label style="color:rgba(255,255,255,.5)">Club</label>
+        <input type="text" id="openReg_club" list="openReg_clubList" placeholder="Tapez ou choisissez votre club">
+        <datalist id="openReg_clubList"></datalist>
+      </div>
+      <div id="openRegMsg" style="font-size:13px;min-height:18px"></div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-g btn-sm" onclick="submitOpenRegistration()">✓ Envoyer mon inscription</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeOpenRegModal()">Annuler</button>
       </div>
     </div>
   </div>
@@ -3420,13 +3725,24 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           <div style="display:flex;gap:10px;align-items:flex-end">
             <div style="flex:1">
               <label style="color:rgba(255,255,255,.5)">Rôle</label>
-              <select id="newU_role" style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <select id="newU_role" onchange="toggleNewUResponsableFields()" style="background:#2a2018;border-color:#4a3828;color:#fff">
                 <option value="scorer">✏️ Scorer</option>
                 <option value="spectator">👁 Spectateur</option>
+                <option value="responsable">🏟️ Responsable club (inscription joueurs)</option>
                 <option value="admin">👑 Admin</option>
               </select>
             </div>
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
+          </div>
+          <div id="newU_respFields" style="display:none;gap:10px;flex-direction:column;background:rgba(255,255,255,.05);border-radius:8px;padding:10px">
+            <div>
+              <label style="color:rgba(255,255,255,.5)">Nom du club</label>
+              <input type="text" id="newU_club" placeholder="Pickleball Club de..." style="background:#2a2018;border-color:#4a3828;color:#fff">
+            </div>
+            <div>
+              <label style="color:rgba(255,255,255,.5)">Quota d'inscriptions autorisées</label>
+              <input type="number" id="newU_maxPlayers" min="1" value="4" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            </div>
           </div>
           <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
         </div>
@@ -3483,6 +3799,46 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           </table>
         </div>
         <div style="font-size:11px;color:rgba(255,255,255,.25);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
+      </div>
+
+      <!-- Réglages inscriptions en ligne -->
+      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+          <div class="admin-panel-ttl" style="margin-bottom:0">📋 Inscriptions en ligne</div>
+          <button onclick="openAdminRegSettings()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <label style="display:flex;align-items:center;gap:8px;color:#fff;font-size:14px;cursor:pointer">
+              <input type="checkbox" id="regS_respEnabled" style="width:18px;height:18px">
+              Activer l'inscription par responsables de club (quota individuel par compte)
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;color:#fff;font-size:14px;cursor:pointer">
+              <input type="checkbox" id="regS_openEnabled" style="width:18px;height:18px">
+              Activer le bouton d'inscription publique (sans compte)
+            </label>
+            <div>
+              <label style="color:rgba(255,255,255,.5)">Nombre max d'inscriptions publiques (quota séparé)</label>
+              <input type="number" id="regS_openMax" min="0" value="0" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            </div>
+          </div>
+          <div>
+            <label style="color:rgba(255,255,255,.5)">Liste des clubs proposés (un par ligne, la personne peut aussi taper un autre nom)</label>
+            <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#2a2018;border:1px solid #4a3828;color:#fff;border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px">
+          <button class="btn btn-g btn-sm" onclick="saveRegistrationSettings()">✓ Enregistrer les réglages</button>
+          <div id="regSettingsMsg" style="font-size:13px"></div>
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,.35);margin-top:8px;line-height:1.6">
+          💡 Les <strong style="color:#ffd080">responsables de club</strong> se créent comme un compte utilisateur ci-dessus (rôle « Responsable club ») avec leur propre quota. Le <strong style="color:#80c8ff">bouton public</strong> utilise un quota global séparé défini ici. Vous pouvez activer l'un, l'autre, ou les deux en même temps.
+        </div>
+
+        <div style="margin-top:20px">
+          <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
+          <div id="regPendingList"><div style="color:rgba(255,255,255,.3);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
+        </div>
       </div>
 
     </div>
