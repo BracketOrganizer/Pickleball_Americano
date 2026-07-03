@@ -429,7 +429,7 @@ function renderPendingRegistrations(){
     const origin = r.source==='responsable' ? `🏟️ ${r.responsableName||'Responsable'}` : '📝 Inscription libre';
     return `<div style="border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700;color:#fff">${(r.name||'—')}</div>
+        <div style="font-weight:700;color:var(--ink)">${(r.name||'—')}</div>
         <div style="color:rgba(255,255,255,.5);font-size:12px">${r.club||'—'} · ${origin}</div>
       </div>
       <div style="display:flex;gap:8px">
@@ -692,9 +692,9 @@ window.loadUserList = async function(){
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid rgba(255,255,255,.08);font-size:13px';
       tr.innerHTML=`
-        <td style="padding:8px 6px;color:#fff;font-weight:600">${u.name||'—'}</td>
-        <td style="padding:8px 6px;color:rgba(255,255,255,.55);font-size:12px">${u.email||'—'}</td>
-        <td style="padding:8px 6px">${roleIcon} <span style="color:rgba(255,255,255,.7)">${u.role||'—'}</span></td>
+        <td style="padding:8px 6px;color:var(--ink);font-weight:600">${u.name||'—'}</td>
+        <td style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
+        <td style="padding:8px 6px">${roleIcon} <span style="color:var(--ink2)">${u.role||'—'}</span></td>
         <td style="padding:8px 6px">
           ${isMe ? '<span style="color:rgba(255,255,255,.3);font-size:11px">— vous —</span>' :
             `<button onclick="adminDeleteUser('${uid}','${(u.name||u.email||uid).replace(/'/g,"\\'")}')"
@@ -3057,7 +3057,7 @@ body{font-family:'Exo 2',sans-serif;background:var(--bg);color:var(--ink);min-he
 .hdr-drawer-overlay.open{display:block}
 
 /* ADMIN PANEL */
-.admin-panel{background:var(--ink);color:#fff;padding:16px 20px;border-bottom:2px solid rgba(255,255,255,.1)}
+.admin-panel{background:var(--s1);color:var(--ink);padding:16px 20px;border-bottom:2px solid var(--bdr)}
 .admin-panel-ttl{font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px}
 
 /* SPECTATOR NAV BAR */
@@ -3602,7 +3602,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       <button class="btn btn-ghost btn-sm" onclick="respLogout()">⏻ Déconnexion</button>
     </div>
     <div style="background:var(--s2);border:1px solid var(--bdr2);border-radius:14px;padding:18px;margin-bottom:18px">
-      <div id="respQuota" style="font-weight:700;color:#fff;margin-bottom:14px">0 / 0 inscription</div>
+      <div id="respQuota" style="font-weight:700;color:var(--ink);margin-bottom:14px">0 / 0 inscription</div>
       <div id="respAddForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <input type="text" id="resp_p_name" placeholder="Nom et prénom du joueur" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')respAddPlayer()">
         <button class="btn btn-g btn-sm" onclick="respAddPlayer()">✓ Inscrire</button>
@@ -3711,21 +3711,21 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <div class="admin-panel-ttl">➕ Créer un compte utilisateur</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
-            <label style="color:rgba(255,255,255,.5)">Prénom / Nom</label>
-            <input type="text" id="newU_name" placeholder="Marie Dupont" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            <label style="color:var(--muted)">Prénom / Nom</label>
+            <input type="text" id="newU_name" placeholder="Marie Dupont" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
           </div>
           <div>
-            <label style="color:rgba(255,255,255,.5)">Email</label>
-            <input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            <label style="color:var(--muted)">Email</label>
+            <input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
           </div>
           <div>
-            <label style="color:rgba(255,255,255,.5)">Mot de passe (6 car. min)</label>
-            <input type="password" id="newU_pwd" placeholder="••••••••" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            <label style="color:var(--muted)">Mot de passe (6 car. min)</label>
+            <input type="password" id="newU_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
           </div>
           <div style="display:flex;gap:10px;align-items:flex-end">
             <div style="flex:1">
-              <label style="color:rgba(255,255,255,.5)">Rôle</label>
-              <select id="newU_role" onchange="toggleNewUResponsableFields()" style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <label style="color:var(--muted)">Rôle</label>
+              <select id="newU_role" onchange="toggleNewUResponsableFields()" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
                 <option value="scorer">✏️ Scorer</option>
                 <option value="spectator">👁 Spectateur</option>
                 <option value="responsable">🏟️ Responsable club (inscription joueurs)</option>
@@ -3734,14 +3734,14 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
             </div>
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
           </div>
-          <div id="newU_respFields" style="display:none;gap:10px;flex-direction:column;background:rgba(255,255,255,.05);border-radius:8px;padding:10px">
+          <div id="newU_respFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
             <div>
-              <label style="color:rgba(255,255,255,.5)">Nom du club</label>
-              <input type="text" id="newU_club" placeholder="Pickleball Club de..." style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <label style="color:var(--muted)">Nom du club</label>
+              <input type="text" id="newU_club" placeholder="Pickleball Club de..." style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
             <div>
-              <label style="color:rgba(255,255,255,.5)">Quota d'inscriptions autorisées</label>
-              <input type="number" id="newU_maxPlayers" min="1" value="4" style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <label style="color:var(--muted)">Quota d'inscriptions autorisées</label>
+              <input type="number" id="newU_maxPlayers" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
           </div>
           <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
@@ -3753,13 +3753,13 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <div class="admin-panel-ttl">🔑 Modifier le rôle d'un compte</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
-            <label style="color:rgba(255,255,255,.5)">UID de l'utilisateur</label>
-            <input type="text" id="adminUidInput" placeholder="Firebase Auth → Users → User UID" style="background:#2a2018;border-color:#4a3828;color:#fff">
+            <label style="color:var(--muted)">UID de l'utilisateur</label>
+            <input type="text" id="adminUidInput" placeholder="Firebase Auth → Users → User UID" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
           </div>
           <div style="display:flex;gap:10px;align-items:flex-end">
             <div style="flex:1">
-              <label style="color:rgba(255,255,255,.5)">Nouveau rôle</label>
-              <select id="adminRoleSelect" style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <label style="color:var(--muted)">Nouveau rôle</label>
+              <select id="adminRoleSelect" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
                 <option value="admin">👑 Admin</option>
                 <option value="scorer" selected>✏️ Scorer</option>
                 <option value="spectator">👁 Spectateur</option>
@@ -3768,76 +3768,76 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
             <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
-          <div style="font-size:11px;color:rgba(255,255,255,.35);line-height:1.6">
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">
             💡 <strong style="color:#ffd080">Admin</strong> = tout ·
             <strong style="color:#80c8ff">Scorer</strong> = scores + noms ·
-            <strong style="color:rgba(255,255,255,.5)">Spectateur</strong> = lecture seule
+            <strong style="color:var(--muted)">Spectateur</strong> = lecture seule
           </div>
         </div>
       </div>
 
       <!-- Liste des utilisateurs inscrits -->
-      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px">
+      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
           <div class="admin-panel-ttl" style="margin-bottom:0">👥 Utilisateurs inscrits</div>
-          <button onclick="loadUserList()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Rafraîchir</button>
+          <button onclick="loadUserList()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Rafraîchir</button>
         </div>
         <div id="userListMsg" style="font-size:13px;min-height:18px;margin-bottom:8px"></div>
         <div style="overflow-x:auto">
           <table style="width:100%;border-collapse:collapse;min-width:480px">
             <thead>
-              <tr style="border-bottom:1px solid rgba(255,255,255,.15)">
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:rgba(255,255,255,.4)">Nom</th>
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:rgba(255,255,255,.4)">Email</th>
-                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:rgba(255,255,255,.4)">Rôle</th>
-                <th style="padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:rgba(255,255,255,.4)">Action</th>
+              <tr style="border-bottom:1px solid var(--bdr2)">
+                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Nom</th>
+                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Email</th>
+                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Rôle</th>
+                <th style="padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Action</th>
               </tr>
             </thead>
             <tbody id="userListBody">
-              <tr><td colspan="4" style="color:rgba(255,255,255,.3);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
+              <tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
             </tbody>
           </table>
         </div>
-        <div style="font-size:11px;color:rgba(255,255,255,.25);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
       </div>
 
       <!-- Réglages inscriptions en ligne -->
-      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px">
+      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
           <div class="admin-panel-ttl" style="margin-bottom:0">📋 Inscriptions en ligne</div>
-          <button onclick="openAdminRegSettings()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
+          <button onclick="openAdminRegSettings()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
           <div style="display:flex;flex-direction:column;gap:10px">
-            <label style="display:flex;align-items:center;gap:8px;color:#fff;font-size:14px;cursor:pointer">
+            <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer">
               <input type="checkbox" id="regS_respEnabled" style="width:18px;height:18px">
               Activer l'inscription par responsables de club (quota individuel par compte)
             </label>
-            <label style="display:flex;align-items:center;gap:8px;color:#fff;font-size:14px;cursor:pointer">
+            <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer">
               <input type="checkbox" id="regS_openEnabled" style="width:18px;height:18px">
               Activer le bouton d'inscription publique (sans compte)
             </label>
             <div>
-              <label style="color:rgba(255,255,255,.5)">Nombre max d'inscriptions publiques (quota séparé)</label>
-              <input type="number" id="regS_openMax" min="0" value="0" style="background:#2a2018;border-color:#4a3828;color:#fff">
+              <label style="color:var(--muted)">Nombre max d'inscriptions publiques (quota séparé)</label>
+              <input type="number" id="regS_openMax" min="0" value="0" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
           </div>
           <div>
-            <label style="color:rgba(255,255,255,.5)">Liste des clubs proposés (un par ligne, la personne peut aussi taper un autre nom)</label>
-            <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#2a2018;border:1px solid #4a3828;color:#fff;border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
+            <label style="color:var(--muted)">Liste des clubs proposés (un par ligne, la personne peut aussi taper un autre nom)</label>
+            <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#fff;border:1px solid var(--bdr2);color:var(--ink);border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:10px">
           <button class="btn btn-g btn-sm" onclick="saveRegistrationSettings()">✓ Enregistrer les réglages</button>
           <div id="regSettingsMsg" style="font-size:13px"></div>
         </div>
-        <div style="font-size:11px;color:rgba(255,255,255,.35);margin-top:8px;line-height:1.6">
+        <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
           💡 Les <strong style="color:#ffd080">responsables de club</strong> se créent comme un compte utilisateur ci-dessus (rôle « Responsable club ») avec leur propre quota. Le <strong style="color:#80c8ff">bouton public</strong> utilise un quota global séparé défini ici. Vous pouvez activer l'un, l'autre, ou les deux en même temps.
         </div>
 
         <div style="margin-top:20px">
           <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
-          <div id="regPendingList"><div style="color:rgba(255,255,255,.3);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
+          <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
         </div>
       </div>
 
