@@ -2226,11 +2226,13 @@ function startTVAutoScroll(){
   const SPEED_PX_PER_SEC = 23; // vitesse de défilement — lent, pensé pour être lisible
   const PAUSE_MS = 2500;
   let lastTs = null;
+  let dbgFrames = 0;
   function tick(ts){
     if(!el.isConnected){ tvScrollRAF = null; return; }
     if(lastTs === null) lastTs = ts;
     const dt = ts - lastTs;
     lastTs = ts;
+    dbgFrames++;
     const maxScroll = el.scrollHeight - el.clientHeight;
     if(maxScroll > 6){
       const now = Date.now();
@@ -2249,6 +2251,9 @@ function startTVAutoScroll(){
         }
       }
     }
+    const dbg = document.getElementById('tvScrollDebug');
+    if(dbg) dbg.textContent =
+      `frames:${dbgFrames} dt:${dt.toFixed(0)}ms\nphase:${tvScrollState.phase}\nscrollTop:${Math.round(el.scrollTop)} / max:${Math.round(maxScroll)}\nscrollH:${el.scrollHeight} clientH:${el.clientHeight}\nscrollEnabled:${getTVSettings().scroll}`;
     tvScrollRAF = requestAnimationFrame(tick);
   }
   tvScrollRAF = requestAnimationFrame(tick);
@@ -4392,6 +4397,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
   </div>
   <div class="tv-sub-ttl" id="tvSubTitle">⚽ Résultats en direct</div>
   <div class="tv-body" id="tvContent"></div>
+  <div id="tvScrollDebug" style="position:fixed;left:8px;bottom:8px;z-index:999;background:rgba(0,0,0,.75);color:#0f0;font-family:monospace;font-size:11px;padding:6px 8px;border-radius:6px;line-height:1.5;pointer-events:none;white-space:pre"></div>
 
   <!-- Barre de réglages : pour la personne qui installe l'écran. Peut être masquée une fois réglée. -->
   <div class="tv-bar" id="tvControlBar">
