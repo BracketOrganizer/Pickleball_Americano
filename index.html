@@ -747,11 +747,11 @@ window.loadUserList = async function(){
   if(!isAdmin()) return;
   const listEl = document.getElementById('userListBody');
   if(!listEl) return;
-  listEl.innerHTML = '<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
+  listEl.innerHTML = '<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
   try {
     const { getDocs, collection: col2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
     const snap = await getDocs(col2(db,'users'));
-    if(snap.empty){ listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun utilisateur enregistré.</td></tr>'; return; }
+    if(snap.empty){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun utilisateur enregistré.</td></tr>'; return; }
     listEl.innerHTML='';
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
@@ -759,25 +759,69 @@ window.loadUserList = async function(){
       const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',responsable:'🏟️'};
       const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
       const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
+      const uidShort = uid.slice(0,6)+'…'+uid.slice(-4);
+      const safeName = (u.name||u.email||uid).replace(/'/g,"\\'");
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
       tr.innerHTML=`
-        <td style="padding:8px 6px;color:var(--ink);font-weight:600">${u.name||'—'}</td>
-        <td style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
-        <td style="padding:8px 6px"><span style="color:var(--ink2)">${rolesDisplay}</span></td>
-        <td style="padding:8px 6px">
-          ${isMe ? '<span style="color:var(--muted);font-size:11px">— vous —</span>' :
-            `<button onclick="adminDeleteUser('${uid}','${(u.name||u.email||uid).replace(/'/g,"\\'")}')"
-              style="background:#8a1810;border:1px solid #c04030;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:\'Exo 2\',sans-serif;font-weight:600;transition:all .15s"
-              onmouseover="this.style.background=\'#c02818\'" onmouseout="this.style.background=\'#8a1810\'">
-              🗑 Supprimer
-            </button>`
-          }
+        <td data-label="Nom" style="padding:8px 6px;color:var(--ink);font-weight:600">${u.name||'—'}</td>
+        <td data-label="Email" style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
+        <td data-label="UID" style="padding:8px 6px">
+          <span style="font-family:monospace;font-size:11px;color:var(--muted)" title="${uid}">${uidShort}</span>
+          <button onclick="copyUID('${uid}',this)" title="Copier l'UID complet"
+            style="background:none;border:1px solid var(--bdr2);color:var(--muted);border-radius:5px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:4px">📋</button>
+        </td>
+        <td data-label="Rôle" style="padding:8px 6px"><span style="color:var(--ink2)">${rolesDisplay}</span></td>
+        <td data-label="Action" style="padding:8px 6px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+            <button onclick="adminEditUserRole('${uid}','${safeName}')"
+              style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:'Exo 2',sans-serif;font-weight:600">
+              ✏️ Rôle
+            </button>
+            ${isMe ? '' :
+              `<button onclick="adminDeleteUser('${uid}','${safeName}')"
+                style="background:#8a1810;border:1px solid #c04030;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:\'Exo 2\',sans-serif;font-weight:600;transition:all .15s"
+                onmouseover="this.style.background=\'#c02818\'" onmouseout="this.style.background=\'#8a1810\'">
+                🗑 Supprimer
+              </button>`
+            }
+          </div>
         </td>`;
       listEl.appendChild(tr);
     });
   } catch(e){
-    listEl.innerHTML=`<tr><td colspan="4" style="color:var(--red);font-size:13px;padding:10px 0">Erreur : ${e.message}</td></tr>`;
+    listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);font-size:13px;padding:10px 0">Erreur : ${e.message}</td></tr>`;
+  }
+};
+
+// ── Copier l'UID dans le presse-papier ────────────────────
+window.copyUID = function(uid, btn){
+  const done = ()=>{
+    if(!btn) return;
+    const old = btn.textContent;
+    btn.textContent='✅';
+    setTimeout(()=>{ btn.textContent=old; },1200);
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(uid).then(done).catch(()=>{ prompt('UID (copiez manuellement) :', uid); });
+  } else {
+    prompt('UID (copiez manuellement) :', uid);
+  }
+};
+
+// ── Ouvrir directement le formulaire "Modifier rôle" pré-rempli
+//    depuis la liste des utilisateurs (plus besoin de taper l'UID) ──
+window.adminEditUserRole = async function(uid, name){
+  const input = document.getElementById('adminUidInput');
+  if(input) input.value = uid;
+  await window.loadUserRolesIntoForm();
+  const box = document.getElementById('roleEditBox');
+  if(box){
+    box.scrollIntoView({ behavior:'smooth', block:'start' });
+    box.style.transition='background-color .3s';
+    const prevBg = box.style.backgroundColor;
+    box.style.backgroundColor = 'var(--ylw-bg)';
+    setTimeout(()=>{ box.style.backgroundColor = prevBg; }, 900);
   }
 };
 
@@ -3573,6 +3617,26 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
   .print-btn-bar .btn { flex: 1 1 calc(50% - 6px); font-size: 12px; padding: 7px 8px; }
 }
 
+/* ── PANNEAU ADMIN — MOBILE ── */
+@media (max-width: 767px) {
+  /* Tableau utilisateurs → cartes empilées (plus de scroll horizontal) */
+  .user-tbl thead { display: none; }
+  .user-tbl, .user-tbl tbody, .user-tbl tr, .user-tbl td { display: block; width: 100%; }
+  .user-tbl tr { border: 1px solid var(--bdr); border-radius: 10px; margin-bottom: 10px; padding: 8px 12px; background: var(--s1); }
+  .user-tbl td { border: none !important; padding: 5px 0 !important; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .user-tbl td::before { content: attr(data-label); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); font-weight: 700; flex-shrink: 0; }
+  .user-tbl td[data-label="Action"] > div { justify-content: flex-end; width: 100%; }
+
+  /* Formulaires admin (créer compte / modifier rôle) : cases de rôle plus grandes, faciles au doigt */
+  #adminPanel input[type=checkbox] { width: 18px; height: 18px; }
+  #adminPanel label { font-size: 14px; }
+  #adminPanel .admin-panel-ttl { font-size: 15px; }
+  #roleEditBox { padding: 10px; }
+}
+@media (max-width: 480px) {
+  .user-tbl td[data-label="UID"] span { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+}
+
 /* ── TABLETTE PORTRAIT (481px – 767px) ── */
 @media (min-width: 481px) and (max-width: 767px) {
   .hdr { padding: 0 16px; }
@@ -3905,13 +3969,13 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       </div>
 
       <!-- Changer le rôle d'un compte existant -->
-      <div>
+      <div id="roleEditBox" style="border-radius:10px">
         <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s) d'un compte</div>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1">
+          <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
               <label style="color:var(--muted)">UID de l'utilisateur</label>
-              <input type="text" id="adminUidInput" placeholder="Firebase Auth → Users → User UID" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+              <input type="text" id="adminUidInput" placeholder="Cliquez '✏️ Rôle' dans la liste ci-dessous, ou collez l'UID" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
             <button class="btn btn-ghost btn-sm" onclick="loadUserRolesIntoForm()">🔄 Charger</button>
           </div>
@@ -3947,7 +4011,8 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
           <div style="font-size:11px;color:var(--muted);line-height:1.6">
-            💡 Un même compte peut cumuler plusieurs rôles (ex : Scorer + Responsable club) : l'accès combiné se fait automatiquement à la connexion. ·
+            💡 Astuce : cliquez sur "✏️ Rôle" dans la liste des utilisateurs plus bas pour pré-remplir ce formulaire automatiquement (plus besoin de copier l'UID manuellement). ·
+            Un même compte peut cumuler plusieurs rôles (ex : Scorer + Responsable club) : l'accès combiné se fait automatiquement à la connexion. ·
             <strong style="color:#ffd080">Admin</strong> = tout ·
             <strong style="color:#80c8ff">Scorer</strong> = scores + noms ·
             <strong style="color:var(--muted)">Spectateur</strong> = lecture seule
@@ -3963,17 +4028,18 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         </div>
         <div id="userListMsg" style="font-size:13px;min-height:18px;margin-bottom:8px"></div>
         <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;min-width:480px">
+          <table class="user-tbl" style="width:100%;border-collapse:collapse">
             <thead>
               <tr style="border-bottom:1px solid var(--bdr2)">
                 <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Nom</th>
                 <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Email</th>
+                <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">UID</th>
                 <th style="text-align:left;padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Rôle</th>
                 <th style="padding:6px 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)">Action</th>
               </tr>
             </thead>
             <tbody id="userListBody">
-              <tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
+              <tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur "Rafraîchir" pour charger la liste.</td></tr>
             </tbody>
           </table>
         </div>
