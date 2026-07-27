@@ -428,6 +428,11 @@ let RESP_REGS    = [];
 function normalizeName(s){
   return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
 }
+// Transforme un nom normalisé en identifiant de document Firestore valide,
+// utilisé comme "verrou" anti-doublon (voir plus bas).
+function nameSlug(name){
+  return normalizeName(name).replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,120) || 'joueur';
+}
 
 async function loadRegistrationSettings(){
   try {
@@ -540,7 +545,11 @@ window.validateRegistration = async function(id){
 };
 window.rejectRegistration = async function(id){
   if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
-  try { await deleteDoc(doc(db,'americano_registrations',id)); }
+  try {
+    const reg = REG_PENDING.find(r=>r.id===id);
+    await deleteDoc(doc(db,'americano_registrations',id));
+    if(reg && reg.nameSlug){ try { await deleteDoc(doc(db,'americano_reg_names',reg.nameSlug)); } catch(e){} }
+  }
   catch(e){ alert('Erreur : '+e.message); }
 };
 
@@ -623,25 +632,37 @@ window.respAddPlayer = async function(){
   const g = document.getElementById('resp_p_gd').value || 'X';
   const msg = document.getElementById('respAddMsg');
   if(!name){ if(msg){ msg.textContent='Le nom et prénom du joueur sont obligatoires.'; msg.style.color='var(--red)'; } return; }
+  const btn = document.querySelector('#respAddForm button');
+  if(btn && btn.disabled) return; // clic déjà en cours de traitement, on ignore les répétitions
+  if(btn) btn.disabled = true;
   try {
-    // Anti-doublon : même joueur déjà inscrit (peu importe le canal) ou déjà dans le tournoi.
-    const norm = normalizeName(name);
-    const dupSnap = await getDocs(collection(db,'americano_registrations'));
-    let dup = false;
-    dupSnap.forEach(d=>{ if(normalizeName(d.data().name)===norm) dup=true; });
-    if(!dup) dup = ST.players.some(p=>normalizeName(p.name)===norm);
-    if(dup){ if(msg){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé).'; msg.style.color='var(--red)'; } return; }
+    // Anti-doublon FIABLE (résiste aux double-clics et aux inscriptions simultanées
+    // depuis 2 appareils) : on réserve d'abord un "verrou" nommé d'après le joueur.
+    // Si le verrou existe déjà, Firestore refuse l'écriture (voir règles de sécurité :
+    // americano_reg_names autorise "create" mais pas "update") → doublon détecté à coup sûr.
+    const slug = nameSlug(name);
+    try {
+      await setDoc(doc(db,'americano_reg_names',slug), { name, createdAtMs: Date.now() });
+    } catch(lockErr){
+      if(msg){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé).'; msg.style.color='var(--red)'; }
+      return;
+    }
     await addDoc(collection(db,'americano_registrations'),{
       source:'responsable', responsableUid: CURRENT_USER.uid, responsableName: RESP_PROFILE.clubName,
-      club: RESP_PROFILE.clubName, name, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+      club: RESP_PROFILE.clubName, name, lv, g, nameSlug: slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
     document.getElementById('resp_p_name').value='';
     if(msg){ msg.textContent='✅ Joueur inscrit, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+  finally { if(btn) btn.disabled = false; }
 };
 window.respDeleteReg = async function(id){
   if(!confirm('Supprimer cette inscription ?')) return;
-  try { await deleteDoc(doc(db,'americano_registrations',id)); }
+  try {
+    const reg = RESP_REGS.find(r=>r.id===id);
+    await deleteDoc(doc(db,'americano_registrations',id));
+    if(reg && reg.nameSlug){ try { await deleteDoc(doc(db,'americano_reg_names',reg.nameSlug)); } catch(e){} }
+  }
   catch(e){ alert('Erreur : '+e.message); }
 };
 window.respLogout = async function(){
@@ -716,25 +737,34 @@ window.submitOpenRegistration = async function(){
   const g = document.getElementById('openReg_gd').value || 'X';
   const msg = document.getElementById('openRegMsg');
   if(!name||!club){ msg.textContent='Nom, prénom et club sont obligatoires.'; msg.style.color='var(--red)'; return; }
+  const submitBtn = document.querySelector('#openRegModal .btn-g');
+  if(submitBtn && submitBtn.disabled) return; // évite les doubles clics / doubles envois
+  if(submitBtn) submitBtn.disabled = true;
   try {
     const snap = await getDocs(collection(db,'americano_registrations'));
-    let used = 0; let dup = false;
-    const norm = normalizeName(name);
-    snap.forEach(d=>{
-      const r=d.data();
-      if(r.source==='open') used++;
-      if(normalizeName(r.name)===norm) dup = true;
-    });
-    if(!dup) dup = ST.players.some(p=>normalizeName(p.name)===norm);
-    if(dup){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé). Si c\'est une erreur, contactez l\'organisateur.'; msg.style.color='var(--red)'; return; }
+    let used = 0;
+    snap.forEach(d=>{ if(d.data().source==='open') used++; });
     if(used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
+    // Anti-doublon FIABLE (résiste aux double-clics et aux inscriptions simultanées
+    // depuis 2 appareils différents) : on réserve d'abord un "verrou" nommé d'après
+    // le joueur. Si le verrou existe déjà, Firestore refuse l'écriture (les règles
+    // de sécurité autorisent "create" sur americano_reg_names mais pas "update")
+    // → le doublon est détecté à coup sûr, même en cas de course entre 2 requêtes.
+    const slug = nameSlug(name);
+    try {
+      await setDoc(doc(db,'americano_reg_names',slug), { name, createdAtMs: Date.now() });
+    } catch(lockErr){
+      msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé). Si c\'est une erreur, contactez l\'organisateur.'; msg.style.color='var(--red)';
+      return;
+    }
     const ref = await addDoc(collection(db,'americano_registrations'),{
-      source:'open', name, club, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+      source:'open', name, club, lv, g, nameSlug: slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
     trackRegLocally(ref.id, name);
     msg.textContent='✅ Inscription envoyée ! Utilisez "👀 Suivre mes inscriptions" sur l\'écran d\'accueil pour voir quand elle sera validée.'; msg.style.color='var(--grn)';
     setTimeout(()=>{ closeOpenRegModal(); }, 2400);
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
+  finally { if(submitBtn) submitBtn.disabled = false; }
 };
 
 // ── Suivi de statut pour les inscrits publics (sans compte) ─────────────
@@ -878,18 +908,26 @@ function updateStepVisibility(){
 // ── Panneau admin ─────────────────────────────────────────
 window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
-  el.style.display = el.style.display==='none' ? 'block' : 'none';
+  const opening = el.style.display==='none';
+  el.style.display = opening ? 'block' : 'none';
+  if(opening && isAdmin()){
+    // Tout se charge automatiquement dès l'ouverture du panneau —
+    // plus besoin de cliquer sur "Charger" / "Rafraîchir".
+    window.openAdminRegSettings();
+    window.loadUserList();
+  }
 };
 
-// ── Charger la liste des utilisateurs ────────────────────
-window.loadUserList = async function(){
+// ── Liste des utilisateurs (admin) — TEMPS RÉEL ──────────
+// Une seule fois abonnée : tout changement de rôle ou nouvel utilisateur
+// se reflète automatiquement, sans avoir à recliquer sur "Rafraîchir".
+window.loadUserList = function(){
   if(!isAdmin()) return;
   const listEl = document.getElementById('userListBody');
   if(!listEl) return;
+  if(unsubUserList) return; // déjà abonné, rien à refaire
   listEl.innerHTML = '<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
-  try {
-    const { getDocs, collection: col2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-    const snap = await getDocs(col2(db,'users'));
+  unsubUserList = onSnapshot(collection(db,'users'), (snap)=>{
     if(snap.empty){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun utilisateur enregistré.</td></tr>'; return; }
     listEl.innerHTML='';
     snap.forEach(d=>{
@@ -928,9 +966,9 @@ window.loadUserList = async function(){
         </td>`;
       listEl.appendChild(tr);
     });
-  } catch(e){
+  }, (e)=>{
     listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);font-size:13px;padding:10px 0">Erreur : ${e.message}</td></tr>`;
-  }
+  });
 };
 
 // ── Copier l'UID dans le presse-papier ────────────────────
