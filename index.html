@@ -73,6 +73,10 @@ let tvScreenIndex = 0;  // index de l'écran actuellement affiché parmi les éc
 let tvLastScreensSig = null; // signature de la dernière liste d'écrans actifs, pour détecter un changement de tour et repartir au début
 let tvLastRenderedKey = null; // clé du dernier écran réellement affiché, pour distinguer un changement d'écran d'une simple actualisation de données
 let unsubResults    = null;
+let unsubPendingRegs = null;   // liste des inscriptions en attente (admin) — temps réel
+let unsubRespRegs    = null;   // inscriptions du responsable de club connecté — temps réel
+let unsubOpenRegCount= null;   // compteur d'inscriptions publiques (bouton d'accueil) — temps réel
+let unsubUserList    = null;   // liste des utilisateurs (admin) — temps réel
 
 const ST = {
   page:1, prevPage:1, rulesOpen:false,
@@ -243,6 +247,9 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubResults)   { unsubResults();    unsubResults=null;    }
+  if(unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
+  if(unsubRespRegs)   { unsubRespRegs();    unsubRespRegs=null;    }
+  if(unsubUserList)   { unsubUserList();    unsubUserList=null;    }
   stopLiveWatch();
   startLiveWatch();
 }
@@ -416,6 +423,12 @@ let REG_PENDING  = [];
 let RESP_PROFILE = null;
 let RESP_REGS    = [];
 
+// Normalise un nom pour comparaison (accents, casse, espaces superflus)
+// afin de détecter les doublons même en cas de faute de frappe mineure.
+function normalizeName(s){
+  return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+
 async function loadRegistrationSettings(){
   try {
     const snap = await getDoc(doc(db,'settings','registration'));
@@ -439,7 +452,7 @@ window.openAdminRegSettings = async function(){
   document.getElementById('regS_openEnabled').checked = REG_SETTINGS.openEnabled;
   document.getElementById('regS_openMax').value = REG_SETTINGS.openMaxSlots || 0;
   document.getElementById('regS_clubs').value = (REG_SETTINGS.clubs||[]).join('\n');
-  await loadPendingRegistrations();
+  window.loadPendingRegistrations();
 };
 
 window.saveRegistrationSettings = async function(){
@@ -458,18 +471,22 @@ window.saveRegistrationSettings = async function(){
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
 };
 
-// ── Liste des inscriptions en attente (admin) ─────────────
-window.loadPendingRegistrations = async function(){
+// ── Liste des inscriptions en attente (admin) — TEMPS RÉEL ─────────────
+// S'abonne une seule fois : toute création/validation/suppression (même
+// depuis un autre appareil) met à jour la liste automatiquement, sans
+// bouton "Charger" à recliquer.
+window.loadPendingRegistrations = function(){
   if(!isAdmin()) return;
+  if(unsubPendingRegs) { renderPendingRegistrations(); return; } // déjà abonné
   const listEl = document.getElementById('regPendingList');
   if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:13px">Chargement…</div>';
-  try {
-    const snap = await getDocs(collection(db,'americano_registrations'));
+  unsubPendingRegs = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
     REG_PENDING = [];
     snap.forEach(d=>{ const r=d.data(); if(r.status==='pending') REG_PENDING.push({ id:d.id, ...r }); });
     REG_PENDING.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
-  } catch(e){ REG_PENDING = []; }
-  renderPendingRegistrations();
+    renderPendingRegistrations();
+    if(ST.page===2) renderPlayers();
+  }, (e)=>{ console.warn('loadPendingRegistrations', e); if(listEl) listEl.innerHTML='<div style="color:var(--red);font-size:13px">Erreur : '+e.message+'</div>'; });
 };
 function renderPendingRegistrations(){
   const listEl = document.getElementById('regPendingList');
@@ -479,7 +496,7 @@ function renderPendingRegistrations(){
   const free = Math.max(0, max - current);
   const capEl = document.getElementById('regPendingCap');
   if(capEl){
-    capEl.textContent = `${current} / ${max} joueurs déjà dans le tournoi — ${free} place${free>1?'s':''} restante${free>1?'s':''}`;
+    capEl.textContent = `${current} / ${max} joueurs déjà dans le tournoi — ${free} place${free>1?'s':''} restante${free>1?'s':''} · 🔄 mise à jour automatique`;
     capEl.style.color = free<=0 ? 'var(--red)' : (free<=REG_PENDING.length ? '#e6a23c' : 'var(--muted)');
   }
   if(REG_PENDING.length===0){
@@ -516,13 +533,14 @@ window.validateRegistration = async function(id){
   try {
     await saveTournament({ players: ST.players });
     await updateDoc(doc(db,'americano_registrations',id),{ status:'imported' });
-    await loadPendingRegistrations();
+    // Pas besoin de recharger manuellement : l'écoute temps réel (onSnapshot)
+    // met à jour la liste et le compteur automatiquement.
     if(ST.page===2) renderPlayers();
   } catch(e){ alert('Erreur : '+e.message); }
 };
 window.rejectRegistration = async function(id){
   if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
-  try { await deleteDoc(doc(db,'americano_registrations',id)); await loadPendingRegistrations(); }
+  try { await deleteDoc(doc(db,'americano_registrations',id)); }
   catch(e){ alert('Erreur : '+e.message); }
 };
 
@@ -546,7 +564,7 @@ window.showResponsableScreen = async function(){
   const logoutBtn = document.getElementById('respLogoutBtn');
   if(backBtn)   backBtn.style.display   = hasStaff ? '' : 'none';
   if(logoutBtn) logoutBtn.style.display = hasStaff ? 'none' : '';
-  await loadResponsableRegs();
+  subscribeResponsableRegs();
 };
 window.openResponsableFromApp = function(){ showResponsableScreen(); };
 window.returnToAppFromResponsable = function(){
@@ -554,17 +572,19 @@ window.returnToAppFromResponsable = function(){
   if(rs) rs.style.display='none';
   document.getElementById('appScreen').style.display='block';
 };
-async function loadResponsableRegs(){
+// TEMPS RÉEL : la liste des inscriptions du club se met à jour toute seule
+// (dès qu'un admin valide/refuse, ou depuis un autre appareil du club).
+function subscribeResponsableRegs(){
+  if(unsubRespRegs){ renderResponsableScreen(); return; } // déjà abonné
   const listEl = document.getElementById('respRegsList');
   if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
-  try {
-    const q = query(collection(db,'americano_registrations'), where('responsableUid','==',CURRENT_USER.uid));
-    const snap = await getDocs(q);
+  const q = query(collection(db,'americano_registrations'), where('responsableUid','==',CURRENT_USER.uid));
+  unsubRespRegs = onSnapshot(q, (snap)=>{
     RESP_REGS = [];
     snap.forEach(d=> RESP_REGS.push({ id:d.id, ...d.data() }));
     RESP_REGS.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
-  } catch(e){ RESP_REGS = []; }
-  renderResponsableScreen();
+    renderResponsableScreen();
+  }, (e)=>{ console.warn('subscribeResponsableRegs', e); RESP_REGS=[]; renderResponsableScreen(); });
 }
 function renderResponsableScreen(){
   const quotaEl = document.getElementById('respQuota');
@@ -604,47 +624,79 @@ window.respAddPlayer = async function(){
   const msg = document.getElementById('respAddMsg');
   if(!name){ if(msg){ msg.textContent='Le nom et prénom du joueur sont obligatoires.'; msg.style.color='var(--red)'; } return; }
   try {
+    // Anti-doublon : même joueur déjà inscrit (peu importe le canal) ou déjà dans le tournoi.
+    const norm = normalizeName(name);
+    const dupSnap = await getDocs(collection(db,'americano_registrations'));
+    let dup = false;
+    dupSnap.forEach(d=>{ if(normalizeName(d.data().name)===norm) dup=true; });
+    if(!dup) dup = ST.players.some(p=>normalizeName(p.name)===norm);
+    if(dup){ if(msg){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé).'; msg.style.color='var(--red)'; } return; }
     await addDoc(collection(db,'americano_registrations'),{
       source:'responsable', responsableUid: CURRENT_USER.uid, responsableName: RESP_PROFILE.clubName,
       club: RESP_PROFILE.clubName, name, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
     document.getElementById('resp_p_name').value='';
     if(msg){ msg.textContent='✅ Joueur inscrit, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
-    await loadResponsableRegs();
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
 };
 window.respDeleteReg = async function(id){
   if(!confirm('Supprimer cette inscription ?')) return;
-  try { await deleteDoc(doc(db,'americano_registrations',id)); await loadResponsableRegs(); }
+  try { await deleteDoc(doc(db,'americano_registrations',id)); }
   catch(e){ alert('Erreur : '+e.message); }
 };
 window.respLogout = async function(){
   RESP_PROFILE = null; RESP_REGS = [];
+  if(unsubRespRegs){ unsubRespRegs(); unsubRespRegs=null; }
   USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   if(auth.currentUser) await signOut(auth);
   else showLogin();
 };
 
 // ── Inscription publique par bouton (sans compte) ──────────
-async function refreshPublicRegUI(){
+// TEMPS RÉEL : bouton + quota se mettent à jour tout seuls (nouvelle
+// inscription d'un autre visiteur, ou changement de réglage par l'admin),
+// sans jamais recharger la page.
+function refreshPublicRegUI(){
   const btn = document.getElementById('openRegBtn');
   if(!btn) return;
-  try {
-    await loadRegistrationSettings();
-    if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
-    const snap = await getDocs(collection(db,'americano_registrations'));
-    let used = 0;
-    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
-    if(used >= REG_SETTINGS.openMaxSlots){
-      btn.style.display='';
-      btn.disabled = true;
-      btn.textContent = '📝 Inscriptions complètes';
-    } else {
-      btn.style.display='';
-      btn.disabled = false;
-      btn.textContent = '📝 S\'inscrire au tournoi';
+  updatePublicRegBtn(); // affiche tout de suite le bouton de suivi si des inscriptions sont mémorisées localement
+  if(unsubOpenRegCount) return; // déjà abonné, rien d'autre à refaire
+  const settingsRef = doc(db,'settings','registration');
+  onSnapshot(settingsRef, (snap)=>{
+    if(snap.exists()){
+      const d = snap.data();
+      REG_SETTINGS = {
+        responsableEnabled: !!d.responsableEnabled,
+        openEnabled: !!d.openEnabled,
+        openMaxSlots: +d.openMaxSlots || 0,
+        clubs: Array.isArray(d.clubs) ? d.clubs : []
+      };
     }
-  } catch(e){ btn.style.display='none'; }
+    updatePublicRegBtn();
+  }, (e)=>{ console.warn('refreshPublicRegUI settings', e); });
+  unsubOpenRegCount = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
+    let used = 0;
+    snap.forEach(d=>{ if(d.data().source==='open') used++; });
+    OPEN_REG_USED = used;
+    updatePublicRegBtn();
+  }, (e)=>{ console.warn('refreshPublicRegUI count', e); });
+}
+let OPEN_REG_USED = 0;
+function updatePublicRegBtn(){
+  const btn = document.getElementById('openRegBtn');
+  const trackBtn = document.getElementById('openRegTrackBtn');
+  if(trackBtn) trackBtn.style.display = getTrackedRegs().length ? '' : 'none';
+  if(!btn) return;
+  if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
+  if(OPEN_REG_USED >= REG_SETTINGS.openMaxSlots){
+    btn.style.display='';
+    btn.disabled = true;
+    btn.textContent = '📝 Inscriptions complètes';
+  } else {
+    btn.style.display='';
+    btn.disabled = false;
+    btn.textContent = '📝 S\'inscrire au tournoi';
+  }
 }
 window.openPublicRegModal = function(){
   const dl = document.getElementById('openReg_clubList');
@@ -666,16 +718,80 @@ window.submitOpenRegistration = async function(){
   if(!name||!club){ msg.textContent='Nom, prénom et club sont obligatoires.'; msg.style.color='var(--red)'; return; }
   try {
     const snap = await getDocs(collection(db,'americano_registrations'));
-    let used = 0;
-    snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
+    let used = 0; let dup = false;
+    const norm = normalizeName(name);
+    snap.forEach(d=>{
+      const r=d.data();
+      if(r.source==='open') used++;
+      if(normalizeName(r.name)===norm) dup = true;
+    });
+    if(!dup) dup = ST.players.some(p=>normalizeName(p.name)===norm);
+    if(dup){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé). Si c\'est une erreur, contactez l\'organisateur.'; msg.style.color='var(--red)'; return; }
     if(used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
-    await addDoc(collection(db,'americano_registrations'),{
+    const ref = await addDoc(collection(db,'americano_registrations'),{
       source:'open', name, club, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
-    msg.textContent='✅ Inscription envoyée, en attente de validation par l\'organisateur !'; msg.style.color='var(--grn)';
-    setTimeout(()=>{ closeOpenRegModal(); refreshPublicRegUI(); }, 1800);
+    trackRegLocally(ref.id, name);
+    msg.textContent='✅ Inscription envoyée ! Utilisez "👀 Suivre mes inscriptions" sur l\'écran d\'accueil pour voir quand elle sera validée.'; msg.style.color='var(--grn)';
+    setTimeout(()=>{ closeOpenRegModal(); }, 2400);
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
+
+// ── Suivi de statut pour les inscrits publics (sans compte) ─────────────
+// On ne peut pas leur envoyer un email (pas de backend), donc on retient
+// localement (sur cet appareil/navigateur) l'identifiant Firestore de
+// chaque inscription publique envoyée, et on affiche son statut en
+// temps réel via onSnapshot quand ils rouvrent l'app.
+const TRACK_KEY = 'pb_americano_tracked_regs';
+function getTrackedRegs(){
+  try { return JSON.parse(localStorage.getItem(TRACK_KEY)||'[]'); } catch(e){ return []; }
+}
+function trackRegLocally(id, name){
+  const list = getTrackedRegs();
+  list.push({ id, name });
+  try { localStorage.setItem(TRACK_KEY, JSON.stringify(list)); } catch(e){}
+}
+let unsubTrackedRegs = [];
+window.openMyRegStatusModal = function(){
+  const modal = document.getElementById('myRegStatusModal');
+  const body = document.getElementById('myRegStatusBody');
+  if(!modal||!body) return;
+  unsubTrackedRegs.forEach(u=>u());
+  unsubTrackedRegs = [];
+  const tracked = getTrackedRegs();
+  if(tracked.length===0){
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:10px 0">Aucune inscription suivie sur cet appareil.</div>';
+  } else {
+    body.innerHTML = tracked.map(t=>`<div id="myReg_${t.id}" style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <span style="font-weight:600">${t.name}</span>
+      <span id="myRegStatus_${t.id}" style="font-size:12px;color:var(--muted)">Chargement…</span>
+    </div>`).join('');
+    tracked.forEach(t=>{
+      const u = onSnapshot(doc(db,'americano_registrations',t.id), (snap)=>{
+        const el = document.getElementById('myRegStatus_'+t.id);
+        if(!el) return;
+        if(!snap.exists()){ el.textContent='❌ Introuvable (refusée/supprimée)'; el.style.color='var(--red)'; return; }
+        const st = snap.data().status;
+        if(st==='imported'){ el.textContent='✅ Validée — vous êtes dans le tournoi !'; el.style.color='var(--grn)'; }
+        else { el.textContent='⏳ En attente de validation'; el.style.color='#e6a23c'; }
+      }, ()=>{ const el=document.getElementById('myRegStatus_'+t.id); if(el){ el.textContent='Erreur de lecture'; el.style.color='var(--red)'; } });
+      unsubTrackedRegs.push(u);
+    });
+  }
+  modal.classList.add('open');
+};
+window.closeMyRegStatusModal = function(){
+  document.getElementById('myRegStatusModal').classList.remove('open');
+  unsubTrackedRegs.forEach(u=>u());
+  unsubTrackedRegs = [];
+};
+window.clearTrackedRegs = function(){
+  if(!confirm('Oublier le suivi de vos inscriptions sur cet appareil ?')) return;
+  try { localStorage.removeItem(TRACK_KEY); } catch(e){}
+  openMyRegStatusModal();
+  updatePublicRegBtn();
+};
+
 
 function authErrMsg(code){
   const map={
@@ -3799,6 +3915,9 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       <button id="openRegBtn" onclick="openPublicRegModal()" style="display:none;width:100%;margin-top:10px;padding:14px 8px;background:linear-gradient(135deg,#0d3020,#15602a);border:2px solid #30a050;border-radius:10px;color:#c0ffd8;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;font-weight:700">
         📝 S'inscrire au tournoi
       </button>
+      <button id="openRegTrackBtn" onclick="openMyRegStatusModal()" style="display:none;width:100%;margin-top:8px;padding:9px 8px;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.2);border-radius:9px;color:rgba(255,255,255,.75);font-family:'Exo 2',sans-serif;font-size:12.5px;letter-spacing:.3px;cursor:pointer;font-weight:600">
+        👀 Suivre mes inscriptions
+      </button>
     </div>
 
     <!-- ══ ZONE STAFF ══ -->
@@ -3878,6 +3997,18 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <button class="btn btn-g btn-sm" onclick="submitOpenRegistration()">✓ Envoyer mon inscription</button>
         <button class="btn btn-ghost btn-sm" onclick="closeOpenRegModal()">Annuler</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODALE SUIVI DE STATUT (inscription publique, sans compte) -->
+<div class="modal-bg" id="myRegStatusModal">
+  <div class="modal">
+    <div class="modal-ttl">👀 Mes inscriptions</div>
+    <div id="myRegStatusBody" style="display:flex;flex-direction:column;gap:2px;max-height:340px;overflow-y:auto"></div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn btn-ghost btn-sm" onclick="closeMyRegStatusModal()">Fermer</button>
+      <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red);margin-left:auto" onclick="clearTrackedRegs()">🗑 Oublier</button>
     </div>
   </div>
 </div>
