@@ -474,19 +474,30 @@ window.loadPendingRegistrations = async function(){
 function renderPendingRegistrations(){
   const listEl = document.getElementById('regPendingList');
   if(!listEl) return;
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  const current = ST.players.length;
+  const free = Math.max(0, max - current);
+  const capEl = document.getElementById('regPendingCap');
+  if(capEl){
+    capEl.textContent = `${current} / ${max} joueurs déjà dans le tournoi — ${free} place${free>1?'s':''} restante${free>1?'s':''}`;
+    capEl.style.color = free<=0 ? 'var(--red)' : (free<=REG_PENDING.length ? '#e6a23c' : 'var(--muted)');
+  }
   if(REG_PENDING.length===0){
     listEl.innerHTML = '<div style="color:rgba(255,255,255,.35);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>';
     return;
   }
+  const genderIcon = { M:'♂', F:'♀', X:'⚧' };
   listEl.innerHTML = REG_PENDING.map(r=>{
     const origin = r.source==='responsable' ? `🏟️ ${r.responsableName||'Responsable'}` : '📝 Inscription libre';
+    const lv = r.lv || 3;
+    const g = genderIcon[r.g] || '⚧';
     return `<div style="border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700;color:var(--ink)">${(r.name||'—')}</div>
+        <div style="font-weight:700;color:var(--ink)">${(r.name||'—')} <span style="font-size:12px;font-weight:400;color:rgba(255,255,255,.5)">${g} · Niveau ${lv}</span></div>
         <div style="color:rgba(255,255,255,.5);font-size:12px">${r.club||'—'} · ${origin}</div>
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn btn-g btn-sm" onclick="validateRegistration('${r.id}')">✓ Valider</button>
+        <button class="btn btn-g btn-sm" onclick="validateRegistration('${r.id}')" ${free<=0?'disabled title="Quota de joueurs atteint (voir Config)"':''}>✓ Valider</button>
         <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
       </div>
     </div>`;
@@ -496,7 +507,12 @@ window.validateRegistration = async function(id){
   if(!isAdmin()) return;
   const reg = REG_PENDING.find(r=>r.id===id);
   if(!reg) return;
-  ST.players.push({ id:'p'+Date.now()+Math.random(), name:reg.name, lv:3, g:'', club:reg.club||'' });
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  if(ST.players.length >= max){
+    alert(`Impossible : le tournoi est configuré pour ${max} joueurs et cette quantité est déjà atteinte.\nAugmentez le nombre de joueurs dans Config si besoin, ou refusez/supprimez un joueur existant.`);
+    return;
+  }
+  ST.players.push({ id:'p'+Date.now()+Math.random(), name:reg.name, lv: reg.lv||3, g: reg.g||'X', club:reg.club||'' });
   try {
     await saveTournament({ players: ST.players });
     await updateDoc(doc(db,'americano_registrations',id),{ status:'imported' });
@@ -564,13 +580,14 @@ function renderResponsableScreen(){
     listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:14px">Aucun joueur inscrit pour l\'instant.</div>';
     return;
   }
+  const genderIcon = { M:'♂', F:'♀', X:'⚧' };
   listEl.innerHTML = RESP_REGS.map(r=>{
     const badge = r.status==='imported'
       ? '<span style="color:var(--grn);font-size:12px;font-weight:700">✅ Validée — intégrée au tournoi</span>'
       : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>';
     return `<div style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700">${r.name||'—'}</div>
+        <div style="font-weight:700">${r.name||'—'} <span style="font-size:12px;font-weight:400;color:var(--muted)">${genderIcon[r.g]||'⚧'} · Niveau ${r.lv||3}</span></div>
         <div style="margin-top:4px">${badge}</div>
       </div>
       ${r.status==='imported' ? '' : `<button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="respDeleteReg('${r.id}')">🗑 Supprimer</button>`}
@@ -582,12 +599,14 @@ window.respAddPlayer = async function(){
   const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
   if(used >= max){ alert('Quota d\'inscriptions atteint pour votre club.'); return; }
   const name = document.getElementById('resp_p_name').value.trim();
+  const lv = +document.getElementById('resp_p_lv').value || 3;
+  const g = document.getElementById('resp_p_gd').value || 'X';
   const msg = document.getElementById('respAddMsg');
   if(!name){ if(msg){ msg.textContent='Le nom et prénom du joueur sont obligatoires.'; msg.style.color='var(--red)'; } return; }
   try {
     await addDoc(collection(db,'americano_registrations'),{
       source:'responsable', responsableUid: CURRENT_USER.uid, responsableName: RESP_PROFILE.clubName,
-      club: RESP_PROFILE.clubName, name, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+      club: RESP_PROFILE.clubName, name, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
     document.getElementById('resp_p_name').value='';
     if(msg){ msg.textContent='✅ Joueur inscrit, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
@@ -632,6 +651,8 @@ window.openPublicRegModal = function(){
   if(dl) dl.innerHTML = (REG_SETTINGS.clubs||[]).map(c=>`<option value="${c.replace(/"/g,'&quot;')}">`).join('');
   document.getElementById('openReg_name').value='';
   document.getElementById('openReg_club').value='';
+  document.getElementById('openReg_lv').value='3';
+  document.getElementById('openReg_gd').value='M';
   document.getElementById('openRegMsg').textContent='';
   document.getElementById('openRegModal').classList.add('open');
 };
@@ -639,6 +660,8 @@ window.closeOpenRegModal = function(){ document.getElementById('openRegModal').c
 window.submitOpenRegistration = async function(){
   const name = document.getElementById('openReg_name').value.trim();
   const club = document.getElementById('openReg_club').value.trim();
+  const lv = +document.getElementById('openReg_lv').value || 3;
+  const g = document.getElementById('openReg_gd').value || 'X';
   const msg = document.getElementById('openRegMsg');
   if(!name||!club){ msg.textContent='Nom, prénom et club sont obligatoires.'; msg.style.color='var(--red)'; return; }
   try {
@@ -647,7 +670,7 @@ window.submitOpenRegistration = async function(){
     snap.forEach(d=>{ const r=d.data(); if(r.source==='open') used++; });
     if(used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
     await addDoc(collection(db,'americano_registrations'),{
-      source:'open', name, club, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+      source:'open', name, club, lv, g, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
     });
     msg.textContent='✅ Inscription envoyée, en attente de validation par l\'organisateur !'; msg.style.color='var(--grn)';
     setTimeout(()=>{ closeOpenRegModal(); refreshPublicRegUI(); }, 1800);
@@ -3815,6 +3838,8 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       <div id="respQuota" style="font-weight:700;color:var(--ink);margin-bottom:14px">0 / 0 inscription</div>
       <div id="respAddForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <input type="text" id="resp_p_name" placeholder="Nom et prénom du joueur" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')respAddPlayer()">
+        <select id="resp_p_lv" style="min-width:150px"><option value="1">1 – Débutant</option><option value="2">2 – Novice</option><option value="3" selected>3 – Intermédiaire</option><option value="4">4 – Avancé</option><option value="5">5 – Expert</option></select>
+        <select id="resp_p_gd" style="min-width:110px"><option value="M">♂ Homme</option><option value="F">♀ Femme</option><option value="X">⚧ Autre</option></select>
         <button class="btn btn-g btn-sm" onclick="respAddPlayer()">✓ Inscrire</button>
       </div>
       <div id="respQuotaFullMsg" style="display:none;color:#e6a23c;font-size:13px;margin-bottom:8px">⚠️ Quota d'inscriptions atteint pour votre club.</div>
@@ -3837,6 +3862,16 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <label style="color:rgba(255,255,255,.5)">Club</label>
         <input type="text" id="openReg_club" list="openReg_clubList" placeholder="Tapez ou choisissez votre club">
         <datalist id="openReg_clubList"></datalist>
+      </div>
+      <div style="display:flex;gap:10px">
+        <div style="flex:1">
+          <label style="color:rgba(255,255,255,.5)">Niveau</label>
+          <select id="openReg_lv"><option value="1">1 – Débutant</option><option value="2">2 – Novice</option><option value="3" selected>3 – Intermédiaire</option><option value="4">4 – Avancé</option><option value="5">5 – Expert</option></select>
+        </div>
+        <div style="flex:1">
+          <label style="color:rgba(255,255,255,.5)">Sexe</label>
+          <select id="openReg_gd"><option value="M">♂ Homme</option><option value="F">♀ Femme</option><option value="X">⚧ Autre</option></select>
+        </div>
       </div>
       <div id="openRegMsg" style="font-size:13px;min-height:18px"></div>
       <div style="display:flex;gap:10px">
@@ -4082,6 +4117,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
 
         <div style="margin-top:20px">
           <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
+          <div id="regPendingCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
           <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
         </div>
       </div>
