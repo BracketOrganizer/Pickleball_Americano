@@ -23,7 +23,7 @@
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
-         createUserWithEmailAndPassword, signInWithRedirect, getRedirectResult, GoogleAuthProvider,
+         createUserWithEmailAndPassword, signInWithRedirect, signInWithPopup, getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy, where }
@@ -256,8 +256,21 @@ window.loginEmail = async function(){
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try { await signInWithRedirect(auth, gProvider); }
-  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
+  // On tente d'abord signInWithPopup : la fenêtre Google s'ouvre en contexte
+  // de premier niveau, ce qui évite les soucis de "Tracking Prevention"
+  // (Edge/Firefox) qui bloquent le stockage tiers utilisé par l'iframe
+  // technique de signInWithRedirect. Si le popup est bloqué par le
+  // navigateur (mobile, bloqueur de popups...), on retombe sur le redirect.
+  try {
+    await signInWithPopup(auth, gProvider);
+  } catch(e){
+    if(e.code==='auth/popup-blocked' || e.code==='auth/operation-not-supported-in-this-environment' || e.code==='auth/cancelled-popup-request'){
+      try { await signInWithRedirect(auth, gProvider); }
+      catch(e2){ showAuthMsg(authErrMsg(e2.code),'red'); }
+    } else {
+      showAuthMsg(authErrMsg(e.code),'red');
+    }
+  }
 };
 
 window.logout = async function(){
@@ -650,7 +663,10 @@ function authErrMsg(code){
     'auth/weak-password':'Mot de passe trop faible (6 car. min).',
     'auth/popup-closed-by-user':'Connexion Google annulée.',
     'auth/too-many-requests':'Trop de tentatives. Réessayez plus tard.',
-    'auth/invalid-credential':'Email ou mot de passe incorrect.'
+    'auth/invalid-credential':'Email ou mot de passe incorrect.',
+    'auth/network-request-failed':'Connexion réseau impossible. Vérifiez votre connexion.',
+    'auth/web-storage-unsupported':'Votre navigateur bloque le stockage nécessaire à la connexion Google (mode privé ou protection anti-pistage stricte). Essayez de désactiver la protection anti-pistage pour ce site, ou utilisez un autre navigateur.',
+    'auth/internal-error':'Erreur interne de connexion. Réessayez, ou vérifiez que le stockage/cookies ne sont pas bloqués pour ce site.'
   };
   return map[code]||'Erreur : '+code;
 }
