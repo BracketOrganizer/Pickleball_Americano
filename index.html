@@ -523,13 +523,17 @@ function renderPendingRegistrations(){
     return;
   }
   const genderIcon = { M:'♂', F:'♀', X:'⚧' };
-  listEl.innerHTML = REG_PENDING.map(r=>{
+  const bulkBtn = document.getElementById('regValidateAllBtn');
+  if(bulkBtn) bulkBtn.style.display = REG_PENDING.length ? '' : 'none';
+  listEl.innerHTML = REG_PENDING.map((r,i)=>{
     const origin = r.source==='responsable' ? `🏟️ ${r.responsableName||'Responsable'}` : '📝 Inscription libre';
     const lv = r.lv || 3;
     const g = genderIcon[r.g] || '⚧';
+    const willFit = i < free;
+    const rank = `<span style="font-size:11px;font-weight:700;color:${willFit?'#5ad080':'#e6a23c'};background:rgba(255,255,255,.06);border-radius:8px;padding:1px 7px;margin-right:6px">#${i+1}${willFit?'':' · attente'}</span>`;
     return `<div style="border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700;color:var(--ink)">${(r.name||'—')} <span style="font-size:12px;font-weight:400;color:rgba(255,255,255,.5)">${g} · Niveau ${lv}</span></div>
+        <div style="font-weight:700;color:var(--ink)">${rank}${(r.name||'—')} <span style="font-size:12px;font-weight:400;color:rgba(255,255,255,.5)">${g} · Niveau ${lv}</span></div>
         <div style="color:rgba(255,255,255,.5);font-size:12px">${r.club||'—'} · ${origin}</div>
       </div>
       <div style="display:flex;gap:8px">
@@ -539,6 +543,27 @@ function renderPendingRegistrations(){
     </div>`;
   }).join('');
 }
+window.validateAllPending = async function(){
+  if(!isAdmin()) return;
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  let free = Math.max(0, max - ST.players.length);
+  if(free<=0){ alert('Aucune place disponible : le quota du tournoi est déjà atteint.'); return; }
+  const queue = [...REG_PENDING]; // déjà trié par ordre d'arrivée
+  const toValidate = queue.slice(0, free);
+  if(toValidate.length===0) return;
+  if(!confirm(`Valider les ${toValidate.length} plus anciennes inscriptions en attente (dans la limite des ${free} place${free>1?'s':''} restante${free>1?'s':''}) ?`)) return;
+  let ok=0, fail=0;
+  for(const reg of toValidate){
+    try {
+      ST.players.push({ id:'p'+Date.now()+Math.random(), name:reg.name, lv: reg.lv||3, g: reg.g||'X', club:reg.club||'' });
+      await saveTournament({ players: ST.players });
+      await updateDoc(doc(db,'americano_registrations',reg.id),{ status:'imported' });
+      ok++;
+    } catch(e){ fail++; console.warn('validateAllPending', reg.id, e); }
+  }
+  if(ST.page===2) renderPlayers();
+  alert(`${ok} inscription${ok>1?'s':''} validée${ok>1?'s':''}.` + (fail?` ${fail} échec${fail>1?'s':''} (voir console).`:'') + (queue.length>toValidate.length ? `\n${queue.length-toValidate.length} joueur(s) restent en liste d'attente, quota atteint.` : ''));
+};
 window.validateRegistration = async function(id){
   if(!isAdmin()) return;
   const reg = REG_PENDING.find(r=>r.id===id);
@@ -796,12 +821,27 @@ function trackRegLocally(id, name){
   try { localStorage.setItem(TRACK_KEY, JSON.stringify(list)); } catch(e){}
 }
 let unsubTrackedRegs = [];
+let trackedState = {}; // { [id]: { status, exists, rank } } — pour combiner statut + position en file
+function renderTrackedStatus(id){
+  const el = document.getElementById('myRegStatus_'+id);
+  if(!el) return;
+  const s = trackedState[id] || {};
+  if(s.exists===false){ el.textContent='❌ Introuvable (refusée/supprimée)'; el.style.color='var(--red)'; return; }
+  if(s.status==='imported'){ el.textContent='✅ Validée — vous êtes dans le tournoi !'; el.style.color='var(--grn)'; return; }
+  if(s.status==='pending'){
+    el.textContent = s.rank ? `⏳ En attente — position ${s.rank} dans la file` : '⏳ En attente de validation';
+    el.style.color='#e6a23c';
+    return;
+  }
+  el.textContent='Chargement…'; el.style.color='var(--muted)';
+}
 window.openMyRegStatusModal = function(){
   const modal = document.getElementById('myRegStatusModal');
   const body = document.getElementById('myRegStatusBody');
   if(!modal||!body) return;
   unsubTrackedRegs.forEach(u=>u());
   unsubTrackedRegs = [];
+  trackedState = {};
   const tracked = getTrackedRegs();
   if(tracked.length===0){
     body.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:10px 0">Aucune inscription suivie sur cet appareil.</div>';
@@ -810,17 +850,32 @@ window.openMyRegStatusModal = function(){
       <span style="font-weight:600">${t.name}</span>
       <span id="myRegStatus_${t.id}" style="font-size:12px;color:var(--muted)">Chargement…</span>
     </div>`).join('');
+    // Statut individuel de chaque inscription suivie.
     tracked.forEach(t=>{
       const u = onSnapshot(doc(db,'americano_registrations',t.id), (snap)=>{
-        const el = document.getElementById('myRegStatus_'+t.id);
-        if(!el) return;
-        if(!snap.exists()){ el.textContent='❌ Introuvable (refusée/supprimée)'; el.style.color='var(--red)'; return; }
-        const st = snap.data().status;
-        if(st==='imported'){ el.textContent='✅ Validée — vous êtes dans le tournoi !'; el.style.color='var(--grn)'; }
-        else { el.textContent='⏳ En attente de validation'; el.style.color='#e6a23c'; }
+        if(!snap.exists()){ trackedState[t.id] = { exists:false }; renderTrackedStatus(t.id); return; }
+        trackedState[t.id] = { exists:true, status: snap.data().status, rank: (trackedState[t.id]||{}).rank };
+        renderTrackedStatus(t.id);
       }, ()=>{ const el=document.getElementById('myRegStatus_'+t.id); if(el){ el.textContent='Erreur de lecture'; el.style.color='var(--red)'; } });
       unsubTrackedRegs.push(u);
     });
+    // Position dans la file d'attente : une seule écoute partagée sur les
+    // inscriptions "pending" (déjà publiquement lisibles, cf. règles
+    // Firestore), triée par ordre d'arrivée, pour calculer le rang de
+    // chaque inscription suivie qui est encore en attente.
+    const qPending = query(collection(db,'americano_registrations'), where('status','==','pending'));
+    const uq = onSnapshot(qPending, (snap)=>{
+      const list = [];
+      snap.forEach(d=> list.push({ id:d.id, createdAtMs: d.data().createdAtMs||0 }));
+      list.sort((a,b)=> a.createdAtMs-b.createdAtMs);
+      tracked.forEach(t=>{
+        const idx = list.findIndex(r=>r.id===t.id);
+        const rank = idx>=0 ? idx+1 : null;
+        trackedState[t.id] = { ...(trackedState[t.id]||{}), rank };
+        renderTrackedStatus(t.id);
+      });
+    }, (e)=>console.warn('trackedQueueRank', e));
+    unsubTrackedRegs.push(uq);
   }
   modal.classList.add('open');
 };
@@ -4441,8 +4496,11 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         </div>
 
         <div style="margin-top:20px">
-          <div class="admin-panel-ttl">⏳ Inscriptions en attente de validation</div>
-          <div id="regPendingCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+            <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
+            <button id="regValidateAllBtn" class="btn btn-g btn-sm" style="display:none" onclick="validateAllPending()">✓✓ Tout valider (dans la limite des places)</button>
+          </div>
+          <div id="regPendingCap" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
           <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
         </div>
       </div>
