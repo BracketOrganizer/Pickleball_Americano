@@ -934,6 +934,7 @@ function roleBadge(role){
   return map[role]||role;
 }
 function applyRoleUI(){
+  kickTimerWatchers(); // (re)branche le chrono synchronisé une fois connecté
   const name = CURRENT_USER
     ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
     : '📺 Mode Live';
@@ -1624,6 +1625,7 @@ window.newTournament = async function(){  if(!isAdmin()){ alert('Admin uniquemen
   clearInterval(ST.timerIv);
   ST.players=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
+  try { clearSharedTimer(); } catch(e){}
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   await saveTournament({ cfg:ST.cfg, players:[], schedule:[], activeRound:0, status:'setup' });
   renderPlayers(); goTo(1); onCfgChange();
@@ -3152,41 +3154,186 @@ function updateLiveToggleBtn(){
   }
 }
 
-function updateTimerDisplay(){
-  const el=document.getElementById('tmrDsp');if(!el)return;
-  const s=ST.timerSec;
-  el.textContent=fmt(s);
-  el.className='timer-big '+(s===0?'tc-zero':ST.timerMode==='match'?'tc-match':'tc-trans');
-  document.getElementById('tmrLbl').textContent=ST.timerMode==='match'?`⏱ TEMPS DE JEU — ${ST.cfg.mt} min`:`⏸ TRANSITION — ${ST.timerMode==='trans'?ST.cfg.tt:ST.cfg.tp} min`;
-  // ── Signaux sonores ──────────────────────────────────────
-  if(ST.timerRun){
-    if(s===0){
-      // Fin du temps : sirène
-      _playSiren(2.5, 0.9);
-    } else if(s===30){
-      // 30 secondes restantes : alerte
-      _playWarn30();
-    } else if(s>=1 && s<=5){
-      // Compte à rebours final
-      _playCountdownBeep(s===1);
-    }
+// ══════════════════════════════════════════════════════════
+// CHRONO SYNCHRONISÉ (Firestore) — une seule salle = un seul chrono
+// Document : tournamentStatus/timer
+//   { mode, durationSeconds, remainingSeconds, running, endsAt, tvSound, updatedAt }
+// Commandé par l'admin et les scorers ; affiché sur tous les appareils
+// (spectateurs, scorers, admin) et sur l'écran TV, tous synchronisés grâce à
+// l'heure de fin (endsAt) enregistrée dans Firestore.
+// tvSound : son du chrono (sirène, alertes) sur l'écran TV — réglé par le bouton 📺🔊.
+// ══════════════════════════════════════════════════════════
+let TIMER_STATE = { exists:false, mode:'match', durationSeconds:0, remainingSeconds:0, running:false, endsAt:null, tvSound:true };
+let timerUnsub = null, timerRetryMs = 3000, timerBeeped = new Set();
+
+// Correction d'horloge : si l'horloge de l'appareil est décalée de plus de 3 s
+// par rapport au serveur web, on compense (sinon 0 : l'horloge locale est fiable).
+let clockOffsetMs = 0;
+function serverNow(){ return Date.now() + clockOffsetMs; }
+(async function estimateClockOffset(){
+  try {
+    if(!/^https?:$/.test(location.protocol)) return;
+    const t0 = Date.now();
+    const r = await fetch(location.href.split('#')[0], { method:'HEAD', cache:'no-store' });
+    const t1 = Date.now();
+    const h = r.headers.get('date'); if(!h) return;
+    let srv = new Date(h).getTime(); if(isNaN(srv)) return;
+    srv += (parseInt(r.headers.get('age')||'0',10)||0)*1000 + 500; // l'en-tête Date est tronqué à la seconde
+    const off = srv - (t0 + (t1 - t0)/2);
+    clockOffsetMs = Math.abs(off) > 3000 ? Math.round(off) : 0;
+  } catch(e){ /* pas de correction possible : on garde l'horloge locale */ }
+})();
+
+function computeTimerRemaining(){
+  const st = TIMER_STATE;
+  if(!st.exists) return 0;
+  if(st.running && st.endsAt) return Math.max(0, Math.ceil((st.endsAt - serverNow())/1000));
+  return Math.max(0, Math.round(st.remainingSeconds||0));
+}
+
+function watchTimer(){
+  if(timerUnsub) return;
+  timerUnsub = onSnapshot(doc(db,'tournamentStatus','timer'), (snap)=>{
+    timerRetryMs = 3000;
+    const d = snap.exists() ? snap.data() : null;
+    TIMER_STATE = d ? {
+      exists:true,
+      mode: (d.mode==='trans' || d.mode==='tp') ? d.mode : 'match',
+      durationSeconds: d.durationSeconds||0,
+      remainingSeconds: (typeof d.remainingSeconds==='number') ? d.remainingSeconds : (d.durationSeconds||0),
+      running: !!d.running,
+      endsAt: d.endsAt||null,
+      tvSound: d.tvSound !== false
+    } : { exists:false, mode:'match', durationSeconds:0, remainingSeconds:0, running:false, endsAt:null, tvSound:true };
+    // Un appareil qui rejoint en cours de route ne doit pas rejouer les bips déjà passés
+    const b = new Set(), rem = computeTimerRemaining();
+    if(TIMER_STATE.running){ if(rem<=30) b.add(30); for(let s=1;s<=5;s++) if(rem<=s) b.add(s); if(rem===0) b.add(0); }
+    timerBeeped = b;
+    renderTimer();
+    updateTVTimerBar();
+  }, (e)=>{
+    // Écouteur coupé (règles Firestore, ou avant la connexion) : on retente automatiquement
+    console.warn('watchTimer error:', e);
+    timerUnsub = null;
+    const wait = timerRetryMs;
+    timerRetryMs = Math.min(timerRetryMs*2, 60000);
+    setTimeout(watchTimer, wait);
+  });
+}
+// Relance immédiate de l'écouteur (appelée dès qu'un rôle/une connexion est établi)
+function kickTimerWatchers(){ try { watchTimer(); } catch(e){ /* module pas encore entièrement initialisé */ } }
+
+// ── Affichage ────────────────────────────────────────────
+function timerCls(rem){
+  const st = TIMER_STATE;
+  if(!st.exists) return 'tc-match';
+  if(rem===0 && st.durationSeconds>0) return 'tc-zero';
+  return st.mode==='match' ? 'tc-match' : 'tc-trans';
+}
+function timerLabel(){
+  const st = TIMER_STATE;
+  if(!st.exists || !st.durationSeconds) return 'TEMPS DE JEU';
+  const m = Math.round(st.durationSeconds/6)/10;
+  return st.mode==='match' ? `⏱ TEMPS DE JEU — ${m} min` : `⏸ TRANSITION — ${m} min`;
+}
+function timerBeepAllowed(){
+  // Écran TV : suit le réglage « son du chrono sur la TV » (bouton 📺🔊).
+  // Autres appareils : admin/scorer seulement (les spectateurs restent silencieux).
+  if(ST.page==='TV') return TIMER_STATE.tvSound !== false;
+  return isScorer();
+}
+function renderTimer(){
+  const st = TIMER_STATE, rem = computeTimerRemaining();
+  const dsp = document.getElementById('tmrDsp');
+  if(dsp){
+    const txt = st.exists ? fmt(rem) : '--:--';
+    if(dsp.textContent !== txt) dsp.textContent = txt;
+    const cls = 'timer-big '+timerCls(rem);
+    if(dsp.className !== cls) dsp.className = cls;
+  }
+  const lbl = document.getElementById('tmrLbl');
+  if(lbl){ const t = timerLabel(); if(lbl.textContent !== t) lbl.textContent = t; }
+  const p = document.getElementById('tmrP'), r = document.getElementById('tmrR');
+  if(p) p.style.display = (st.exists && st.running && rem>0) ? '' : 'none';
+  if(r) r.style.display = (st.exists && !st.running && rem>0) ? '' : 'none';
+  const tvb = document.getElementById('tvSoundToggle');
+  if(tvb){
+    const t = st.tvSound !== false ? '📺🔊' : '📺🔇';
+    if(tvb.textContent !== t) tvb.textContent = t;
+    tvb.title = st.tvSound !== false ? "Son du chrono sur l'écran TV : activé (cliquer pour couper)" : "Son du chrono sur l'écran TV : coupé (cliquer pour activer)";
+  }
+  if(st.running && timerBeepAllowed()){
+    if(rem===0){ if(!timerBeeped.has(0)){ timerBeeped.add(0); _playSiren(2.5,0.9); } }
+    else if(rem===30 && !timerBeeped.has(30)){ timerBeeped.add(30); _playWarn30(); }
+    else if(rem>=1 && rem<=5 && !timerBeeped.has(rem)){ timerBeeped.add(rem); _playCountdownBeep(rem===1); }
   }
 }
+// (ancien nom, encore appelé par renderTournament)
+function updateTimerDisplay(){ try { renderTimer(); } catch(e){} }
+
+// Grand chrono sur l'écran TV
+function updateTVTimerBar(){
+  const bar = document.getElementById('tvTimerBar'); if(!bar) return;
+  const st = TIMER_STATE; let html = '';
+  if(st.exists){
+    const rem = computeTimerRemaining();
+    const idle = !st.running && rem===st.durationSeconds;                               // remis à zéro
+    const old  = st.running && rem===0 && st.endsAt && serverNow()-st.endsAt > 120000;  // terminé depuis plus de 2 min
+    if(!idle && !old){
+      const cls = rem===0 ? 'z' : (st.mode==='match' ? 'm' : 't');
+      const lab = (st.mode==='match' ? 'Temps de jeu' : 'Transition') + (st.running||rem===0 ? '' : ' (pause)');
+      html = `<div class="tv-tmr ${cls}"><div class="tv-tmr-l">${lab}</div><div class="tv-tmr-t">${fmt(rem)}</div></div>`;
+    }
+  }
+  if(bar.dataset.h !== html){ bar.innerHTML = html; bar.dataset.h = html; }
+  bar.style.display = html ? 'flex' : 'none';
+}
+
+// ── Commandes (admin + scorer) ───────────────────────────
+async function writeTimer(data){
+  if(!isScorer()) return;
+  try { await setDoc(doc(db,'tournamentStatus','timer'), data, { merge:true }); }
+  catch(e){ alert('Chrono : '+(e && e.message ? e.message : e)+'\n(Vérifiez que les règles Firestore autorisent le chrono.)'); }
+}
 window.startTimer = function(mode){
+  if(!isScorer()) return;
   _unlockAudio();
-  clearInterval(ST.timerIv);ST.timerMode=mode;
-  const secs=mode==='match'?ST.cfg.mt:mode==='trans'?ST.cfg.tt:ST.cfg.tp;
-  ST.timerSec=secs*60;ST.timerRun=true;updateTimerDisplay();
-  document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none';
-  ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000);
+  const m = (mode==='trans' || mode==='tp') ? mode : 'match';
+  const mins = m==='match' ? ST.cfg.mt : m==='trans' ? ST.cfg.tt : ST.cfg.tp;
+  const secs = Math.round((+mins||0)*60);
+  return writeTimer({ mode:m, durationSeconds:secs, remainingSeconds:secs, running:true, endsAt:serverNow()+secs*1000, updatedAt:Date.now() });
 };
-window.pauseTimer = function(){clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';document.getElementById('tmrR').style.display='';};
+window.pauseTimer = function(){
+  if(!isScorer()) return;
+  return writeTimer({ running:false, remainingSeconds:computeTimerRemaining(), endsAt:null, updatedAt:Date.now() });
+};
 window.resumeTimer = function(){
+  if(!isScorer()) return;
+  const rem = computeTimerRemaining(); if(!(rem>0)) return;
   _unlockAudio();
-  document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none';
-  ST.timerRun=true;
-  ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000);
+  return writeTimer({ running:true, remainingSeconds:rem, endsAt:serverNow()+rem*1000, updatedAt:Date.now() });
 };
+window.resetTimer = function(){
+  if(!isScorer() || !TIMER_STATE.exists) return;
+  return writeTimer({ running:false, remainingSeconds:TIMER_STATE.durationSeconds, endsAt:null, updatedAt:Date.now() });
+};
+// Son du chrono sur l'écran TV : activé / coupé pour tous les écrans TV
+window.toggleTvSound = function(){
+  if(!isScorer()) return;
+  return writeTimer({ tvSound: TIMER_STATE.tvSound === false, updatedAt:Date.now() });
+};
+// Nouveau tournoi : le chrono partagé repart de zéro (le réglage du son TV est conservé)
+window.clearSharedTimer = function(){
+  if(!isScorer()) return;
+  return writeTimer({ mode:'match', running:false, durationSeconds:0, remainingSeconds:0, endsAt:null, updatedAt:Date.now() });
+};
+
+// Les bips ne fonctionnent sur mobile/TV qu'après un premier geste de l'utilisateur
+['click','touchend','keydown'].forEach(evt=>document.addEventListener(evt, ()=>{ try{ _getAC(); }catch(e){} }, { passive:true }));
+
+// Initialisation + horloge d'affichage (500 ms : l'affichage suit au plus près l'heure de fin)
+watchTimer();
+setInterval(()=>{ try { renderTimer(); updateTVTimerBar(); } catch(e){ /* ignore */ } }, 500);
 
 // ══════════════════════════════════════════════════════════
 // IMPRESSION (identique v5)
@@ -3832,6 +3979,13 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 .tv-clock{ margin-left:auto; font-family:'Oswald',sans-serif; font-size:clamp(20px,2.6vw,34px); font-weight:700; font-variant-numeric:tabular-nums; color:#7affa0; }
 
 .tv-sub-ttl{ text-align:center; font-family:'Oswald',sans-serif; font-size:clamp(20px,3vw,40px); letter-spacing:1px; color:#ffd27a; padding:clamp(10px,2vh,18px) 0 4px; flex-shrink:0; }
+.tv-timerbar{ display:none; justify-content:center; align-items:stretch; padding:6px clamp(16px,4vw,60px) 10px; flex-shrink:0; }
+.tv-tmr{ text-align:center; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); border-radius:14px; padding:6px clamp(20px,4vw,60px); font-family:'Oswald',sans-serif; font-variant-numeric:tabular-nums; }
+.tv-tmr-l{ font-size:clamp(11px,1.2vw,16px); letter-spacing:2px; text-transform:uppercase; color:rgba(255,255,255,.7); }
+.tv-tmr-t{ font-size:clamp(48px,9vw,130px); line-height:1.05; font-weight:700; }
+.tv-tmr.m .tv-tmr-t{ color:#5af08a; }
+.tv-tmr.t .tv-tmr-t{ color:#ffc35a; }
+.tv-tmr.z .tv-tmr-t{ color:#ff6a5a; animation:blink 1s ease-in-out infinite; }
 
 .tv-body{ flex:1; padding:0 clamp(16px,4vw,60px) 90px; overflow-y:auto; scrollbar-width:none; }
 .tv-body::-webkit-scrollbar{ width:0; height:0; }
@@ -4668,18 +4822,20 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
 <div class="page" id="page4">
 <div class="wrap">
 
-  <!-- Timer : visible scorer + admin -->
-  <div class="timer-wrap" data-role="scorer">
+  <!-- Chrono synchronisé : visible par tous (spectateurs, scorer, admin, écran TV) ; commandes scorer + admin -->
+  <div class="timer-wrap" id="chronoPanel">
     <div>
       <div class="timer-lbl" id="tmrLbl">TEMPS DE JEU</div>
-      <div class="timer-big tc-match" id="tmrDsp">10:00</div>
+      <div class="timer-big tc-match" id="tmrDsp">--:--</div>
     </div>
-    <div class="timer-btns">
+    <div class="timer-btns" data-role="scorer" style="display:none">
       <button class="btn btn-g btn-sm" onclick="startTimer('match')">▶ Match</button>
       <button class="btn btn-y btn-sm" onclick="startTimer('trans')">⏸ Transition</button>
       <button class="btn btn-ghost btn-sm" id="tmrP" onclick="pauseTimer()" style="display:none">⏸ Pause</button>
       <button class="btn btn-ghost btn-sm" id="tmrR" onclick="resumeTimer()" style="display:none">▶ Reprendre</button>
-      <button class="btn btn-ghost btn-sm" id="soundToggle" onclick="toggleSound()" title="Activer/couper le son" style="font-size:16px;padding:6px 10px">🔊</button>
+      <button class="btn btn-ghost btn-sm" onclick="resetTimer()" title="Remise à zéro">↺ Zéro</button>
+      <button class="btn btn-ghost btn-sm" id="soundToggle" onclick="toggleSound()" title="Son du chrono sur cet appareil" style="font-size:16px;padding:6px 10px">🔊</button>
+      <button class="btn btn-ghost btn-sm" id="tvSoundToggle" onclick="toggleTvSound()" title="Son du chrono sur l'écran TV" style="font-size:16px;padding:6px 10px">📺🔊</button>
     </div>
   </div>
 
@@ -4940,6 +5096,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     <div class="tv-clock" id="tvClock">--:--:--</div>
   </div>
   <div class="tv-sub-ttl" id="tvSubTitle">⚽ Résultats en direct</div>
+  <div class="tv-timerbar" id="tvTimerBar"></div>
   <div class="tv-body" id="tvContent"></div>
 
   <!-- Barre de réglages : pour la personne qui installe l'écran. Peut être masquée une fois réglée. -->
