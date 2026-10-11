@@ -1944,10 +1944,10 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
     if(_schedDeadline&&relaxMode<4&&Date.now()>_schedDeadline) relaxMode=4; // budget dépassé : on passe au mode le plus souple
     const enforceGender=strictGender&&relaxMode<3;
     let bestMatches=null,bestScore=Infinity;
-    const maxAttempts=relaxMode===0?30:relaxMode<=2?15:8;
+    const maxAttempts=relaxMode===0?12:relaxMode<=2?6:1; // limiter les recherches coûteuses
 
     for(let attempt=0;attempt<maxAttempts;attempt++){
-      if(attempt>0&&relaxMode<4&&_schedDeadline&&Date.now()>_schedDeadline) break; // budget dépassé
+      if(attempt>0&&_schedDeadline&&Date.now()>_schedDeadline) break; // budget global dépassé
       // Trier le groupe selon mixité+niveau avant de l'explorer
       let sorted;
       if(bal==='both'||bal==='gender'){
@@ -1976,13 +1976,13 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
 
         // Essayer chaque joueur disponible comme ancre a1 (pas seulement avail[0])
         // Évite l'échec greedy quand le premier joueur est bloquant
-        for(let a1idx=0;a1idx<avail.length&&!bestM;a1idx++){
+        for(let a1idx=0;a1idx<avail.length&&!bestM&&(!_schedDeadline||Date.now()<=_schedDeadline);a1idx++){
           const a1=avail[a1idx];
-          for(let i=0;i<avail.length;i++){
+          for(let i=0;i<avail.length&&(!_schedDeadline||Date.now()<=_schedDeadline);i++){
             if(i===a1idx)continue;const a2=avail[i];
-            for(let j=0;j<avail.length;j++){
+            for(let j=0;j<avail.length&&(!_schedDeadline||Date.now()<=_schedDeadline);j++){
               if(j===a1idx||j===i)continue;const b1=avail[j];
-              for(let k=j+1;k<avail.length;k++){
+              for(let k=j+1;k<avail.length&&(!_schedDeadline||Date.now()<=_schedDeadline);k++){
                 if(k===a1idx||k===i)continue;const b2=avail[k];
                 let valid=true;
                 if(relaxMode===0) valid=isMatchValid(a1,a2,b1,b2,pairCount,oppCount,lastPartnerRound,currentRound);
@@ -2061,7 +2061,7 @@ function sortForSubs(ids,playCount,byeCount){
   });
 }
 
-function buildSchedule(maxAttempts=24){
+function buildSchedule(maxAttempts=8){
   const cfg=getCfg();if(cfg.n<4){alert('Il faut au moins 4 joueurs.');return false;}
   ST.cfg=cfg;
   _schedDeadline=Date.now()+3000; // budget : 3 s de recherche stricte, ensuite contraintes assouplies
