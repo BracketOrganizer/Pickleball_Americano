@@ -2194,7 +2194,14 @@ function buildSchedule(maxAttempts=24){
       }
       sched.push({waves,subs:[...subs],roundTime:cfg.start});
     }
-    if(totalRelax<bestScore){bestScore=totalRelax;bestSched=sched;if(totalRelax===0)break;}
+    // Priorités : aucune collision, puis un créneau complet de repos, puis les
+    // contraintes de rotation des partenaires/adversaires.
+    const restQuality = scoreAmericanoSchedule(sched, wavesPerRound);
+    const score = restQuality.collisions*1000000000 + restQuality.restViolations*1000000 + totalRelax*1000 + restQuality.maxStreak;
+    if(score<bestScore){
+      bestScore=score;bestSched=sched;
+      if(totalRelax===0 && restQuality.collisions===0 && restQuality.restViolations===0) break;
+    }
   }
 
   // ── Calcul des horaires
@@ -2217,6 +2224,136 @@ window.regenerateLocal = async function(){
     renderGen();
   }
 };
+
+// Évalue une proposition de planning avant de la retenir : collisions et repos.
+// Les matchs anticipés sont rattachés au créneau réel de leur vague parente.
+function scoreAmericanoSchedule(schedule, wavesPerRound){
+  const cfg=ST.cfg||getCfg();
+  const playerSlots=new Map(),usedBySlot=new Map(),waveTimes=new Map(); let collisions=0;
+  // Reconstituer les horaires réels comme ils seront affichés après la génération.
+  let currentTime=cfg.start;
+  schedule.forEach((rd,ri)=>{
+    const normal=rd.waves.filter(wv=>!wv._isEarlyWave),normalTimes=[];
+    let wt=currentTime;
+    normal.forEach((wv,wi)=>{
+      normalTimes.push(wt);waveTimes.set(wv,wt);
+      if(wi<normal.length-1)wt=addMinutes(wt,cfg.mt+cfg.tt);
+    });
+    rd.waves.filter(wv=>wv._isEarlyWave).forEach(wv=>{
+      const parent=wv._parentWaveIdx!=null?Number(wv._parentWaveIdx):normalTimes.length-1;
+      waveTimes.set(wv,normalTimes[parent]||currentTime);
+    });
+    const roundDur=normal.length*cfg.mt+Math.max(0,normal.length-1)*cfg.tt;
+    currentTime=addMinutes(currentTime,roundDur+(ri<schedule.length-1?cfg.tp:0));
+  });
+  const toMinutes=t=>{const m=String(t||'').match(/^(\d{1,2}):(\d{2})$/);return m?Number(m[1])*60+Number(m[2]):0;};
+  const times=[...new Set([...waveTimes.values()])].sort((a,b)=>toMinutes(a)-toMinutes(b));
+  const slotByTime=new Map(times.map((time,i)=>[time,i]));
+  schedule.forEach(rd=>rd.waves.forEach(wv=>{
+    const slot=slotByTime.get(waveTimes.get(wv));
+    if(!usedBySlot.has(slot))usedBySlot.set(slot,new Set());
+    const used=usedBySlot.get(slot);
+    (wv.matches||[]).forEach(m=>{
+      [m.pA1,m.pA2,m.pB1,m.pB2].forEach(id=>{
+        if(used.has(id))collisions++;
+        used.add(id);
+        if(!playerSlots.has(id))playerSlots.set(id,new Set());
+        playerSlots.get(id).add(slot);
+      });
+    });
+  }));
+  let restViolations=0,maxStreak=0;
+  playerSlots.forEach(set=>{
+    const seq=[...set].sort((a,b)=>a-b);let streak=seq.length?1:0;
+    for(let i=1;i<seq.length;i++){
+      if(seq[i]-seq[i-1]===1){restViolations++;streak++;}
+      else streak=1;
+      maxStreak=Math.max(maxStreak,streak);
+    }
+    maxStreak=Math.max(maxStreak,streak);
+  });
+  return {collisions,restViolations,maxStreak};
+}
+
+// Contrôle détaillé du planning : ne modifie jamais les matchs générés.
+function auditAmericanoSchedule(){
+  const cfg=ST.cfg||getCfg();
+  const players=ST.players.slice(0,cfg.n||ST.players.length);
+  const known=new Set(players.map(p=>p.id));
+  const stats=new Map(players.map(p=>[p.id,{id:p.id,name:p.name||pName(p.id),matches:0,byes:0,partners:{},opponents:{},slots:[],maxStreak:0}]));
+  const problems=[],restWarnings=[],partnerRepeats=[],opponentRepeats=[];
+  const events=new Map(); let totalMatches=0,totalByes=0;
+  if(new Set(players.map(p=>p.id)).size!==players.length) problems.push('Identifiant de joueur en double dans la liste.');
+  const toMinutes=t=>{const m=String(t||'').match(/^(\d{1,2}):(\d{2})$/);return m?Number(m[1])*60+Number(m[2]):null;};
+  ST.schedule.forEach((rd,ri)=>{
+    (rd.subs||[]).forEach(id=>{const st=stats.get(id);if(st){st.byes++;totalByes++;}else problems.push(`Remplaçant inconnu au tour ${ri+1}.`);});
+    (rd.waves||[]).forEach((wv,wi)=>{
+      const time=wv.waveTime||rd.roundTime||'';
+      const key=toMinutes(time)!==null?'t:'+time:'i:'+ri+':'+wi;
+      if(!events.has(key))events.set(key,{key,time,minute:toMinutes(time),matches:[],rounds:new Set()});
+      const ev=events.get(key); ev.rounds.add(ri+1);
+      (wv.matches||[]).forEach(m=>ev.matches.push({m,round:ri+1,time}));
+    });
+  });
+  const ordered=[...events.values()].sort((a,b)=>{
+    if(a.minute!==null&&b.minute!==null)return a.minute-b.minute;
+    if(a.minute!==null)return -1;if(b.minute!==null)return 1;return a.key.localeCompare(b.key);
+  });
+  ordered.forEach((ev,slotIdx)=>{
+    const used=new Set();
+    if(ev.matches.length>cfg.t) problems.push(`${ev.time||'Créneau '+(slotIdx+1)} : ${ev.matches.length} matchs simultanés pour ${cfg.t} terrains.`);
+    ev.matches.forEach(({m,round,time})=>{
+      totalMatches++;
+      const ids=[m.pA1,m.pA2,m.pB1,m.pB2];
+      ids.forEach(id=>{if(!known.has(id))problems.push(`Joueur inconnu dans un match du tour ${round} (${time||'horaire inconnu'}).`);});
+      if(new Set(ids).size!==4) problems.push(`Joueur présent deux fois dans le même match au tour ${round} (${time||'horaire inconnu'}).`);
+      ids.filter(id=>known.has(id)).forEach(id=>{
+        if(used.has(id))problems.push(`${stats.get(id)?.name||id} est programmé deux fois au même créneau (${time||'horaire inconnu'}).`);
+        used.add(id);
+        const st=stats.get(id); if(st){st.matches++;st.slots.push(slotIdx);}
+      });
+      if(known.has(m.pA1)&&known.has(m.pA2)){
+        const k=pk(m.pA1,m.pA2);const a=stats.get(m.pA1),b=stats.get(m.pA2);
+        a.partners[k]=(a.partners[k]||0)+1;b.partners[k]=(b.partners[k]||0)+1;
+      }
+      if(known.has(m.pB1)&&known.has(m.pB2)){
+        const k=pk(m.pB1,m.pB2);const a=stats.get(m.pB1),b=stats.get(m.pB2);
+        a.partners[k]=(a.partners[k]||0)+1;b.partners[k]=(b.partners[k]||0)+1;
+      }
+      [[m.pA1,m.pB1],[m.pA1,m.pB2],[m.pA2,m.pB1],[m.pA2,m.pB2]].forEach(([a,b])=>{
+        if(!known.has(a)||!known.has(b))return;
+        const k=pk(a,b);stats.get(a).opponents[k]=(stats.get(a).opponents[k]||0)+1;stats.get(b).opponents[k]=(stats.get(b).opponents[k]||0)+1;
+      });
+    });
+  });
+  const values=[...stats.values()];
+  values.forEach(st=>{
+    const seq=[...new Set(st.slots)].sort((a,b)=>a-b);let streak=seq.length?1:0;
+    for(let i=1;i<seq.length;i++){
+      if(seq[i]-seq[i-1]===1){
+        const label=`${st.name} joue sur deux créneaux consécutifs (${ordered[seq[i-1]]?.time||'créneau précédent'} et ${ordered[seq[i]]?.time||'créneau suivant'}).`;
+        if(!restWarnings.includes(label))restWarnings.push(label);streak++;
+      }else streak=1;
+      st.maxStreak=Math.max(st.maxStreak,streak);
+    }
+    st.maxStreak=Math.max(st.maxStreak,streak);
+    if(st.matches===0)problems.push(`${st.name} ne joue aucun match.`);
+  });
+  const countPairRepeats=(kind,target)=>{
+    const seen=new Map();
+    values.forEach(st=>Object.entries(st[kind]).forEach(([k,n])=>{
+      const other=players.find(p=>p.id!==st.id&&pk(st.id,p.id)===k);
+      if(n>1&&other&&st.id.localeCompare(other.id)<0){
+        const prev=seen.get(k);seen.set(k,{a:st.name,b:stats.get(other.id)?.name||other.name,n:Math.max(n,prev?.n||0)});
+      }
+    }));
+    seen.forEach(item=>target.push(item));
+  };
+  countPairRepeats('partners',partnerRepeats);countPairRepeats('opponents',opponentRepeats);
+  partnerRepeats.sort((a,b)=>b.n-a.n);opponentRepeats.sort((a,b)=>b.n-a.n);
+  const counts=values.map(x=>x.matches);const min=counts.length?Math.min(...counts):0,max=counts.length?Math.max(...counts):0;
+  return {values,totalMatches,totalByes,min,max,problems,restWarnings,partnerRepeats,opponentRepeats,slotCount:ordered.length};
+}
 
 // ══════════════════════════════════════════════════════════
 // PAGE 3 — PLANNING PREVIEW
@@ -2247,8 +2384,24 @@ function renderGen(){
   ST.schedule.forEach(rd=>rd.waves.forEach(wv=>wv.matches.forEach(m=>{[[m.pA1,m.pA2],[m.pB1,m.pB2]].forEach(([a,b])=>{const k=pk(a,b);pCnt[k]=(pCnt[k]||0)+1;if(pCnt[k]===2)dupCount++;});})));
   const totalMatches=ST.schedule.reduce((s,rd)=>rd.waves.reduce((s2,wv)=>s2+wv.matches.length,s),0);
   const lastRound=ST.schedule[ST.schedule.length-1];const lastWave=lastRound.waves[lastRound.waves.length-1];const endTime=lastWave&&lastWave.waveTime?addMinutes(lastWave.waveTime,mt):'--:--';
+  const audit=auditAmericanoSchedule();
   const gib=document.getElementById('genInfoBox');
-  if(gib){gib.className='info info-g';gib.innerHTML=`✅ <strong>${n} joueurs</strong> · <strong>${t} terrains</strong> · <strong>${r} tours</strong> · ${p.wavesPerRound} vague${p.wavesPerRound>1?'s':''}/tour<br>Matchs/joueur : <strong>${minPlay}–${maxPlay}</strong>${p.rem>0?` · <strong>${p.rem} remplaçant${p.rem>1?'s':''}</strong>`:'· <strong>Tous jouent</strong>'}<br>Total matchs : <strong>${totalMatches}</strong> · Début : <strong>${start}</strong> → Fin : <strong>${endTime}</strong>`;}
+  if(gib){
+    gib.className=audit.problems.length?'info info-y':'info info-g';
+    gib.innerHTML=`${audit.problems.length?'⚠️':'✅'} <strong>${n} joueurs</strong> · <strong>${t} terrains</strong> · <strong>${r} tours</strong> · ${p.wavesPerRound} vague${p.wavesPerRound>1?'s':''}/tour<br>Matchs/joueur : <strong>${minPlay}–${maxPlay}</strong>${p.rem>0?` · <strong>${p.rem} remplaçant${p.rem>1?'s':''}</strong>`:' · <strong>Tous jouent</strong>'}<br>Total matchs : <strong>${totalMatches}</strong> · Début : <strong>${start}</strong> → Fin : <strong>${endTime}</strong>
+    <details style="margin-top:10px;text-align:left;background:rgba(255,255,255,.65);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+      <summary style="cursor:pointer;font-weight:800">🔎 Contrôle du planning · ${audit.problems.length?'⚠️ '+audit.problems.length+' anomalie(s) structurelle(s)':'✅ aucune anomalie structurelle'}${audit.restWarnings.length?' · ⚠️ '+audit.restWarnings.length+' repos à vérifier':''}</summary>
+      <div style="margin-top:8px;font-size:12px;line-height:1.6">
+        <strong>Équité des matchs :</strong> ${audit.min} à ${audit.max} match(s) par joueur · ${audit.totalByes} exemption(s) déclarée(s) · ${audit.slotCount} créneau(x) horaires.<br>
+        ${audit.problems.length?`<div style="color:var(--red);font-weight:700;margin-top:5px">${audit.problems.slice(0,10).map(x=>'• '+escHtml(x)).join('<br>')}${audit.problems.length>10?`<br>… et ${audit.problems.length-10} autre(s).`:''}</div>`:'<span style="color:var(--grn);font-weight:700">Aucune collision de joueur, aucun joueur inconnu et aucune capacité de terrain dépassée.</span>'}
+        ${audit.restWarnings.length?`<div style="color:var(--red);font-weight:700;margin-top:7px"><strong>Repos d’un créneau non respecté :</strong><br>${audit.restWarnings.slice(0,12).map(x=>'• '+escHtml(x)).join('<br>')}${audit.restWarnings.length>12?`<br>… et ${audit.restWarnings.length-12} autre(s).`:''}</div>`:'<div style="margin-top:7px;color:var(--grn);font-weight:700">✅ Tous les joueurs disposent d’au moins un créneau complet de repos entre deux matchs.</div>'}
+        ${audit.partnerRepeats.length?`<div style="margin-top:7px"><strong>Partenaires répétés :</strong><br>${audit.partnerRepeats.slice(0,8).map(x=>`${escHtml(x.a)} + ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.partnerRepeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucun partenaire répété détecté.</div>'}
+        ${audit.opponentRepeats.length?`<div style="margin-top:7px"><strong>Adversaires répétés :</strong><br>${audit.opponentRepeats.slice(0,8).map(x=>`${escHtml(x.a)} ↔ ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.opponentRepeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucune répétition d’adversaire détectée.</div>'}
+        <div style="margin-top:7px"><strong>Matchs et repos par joueur :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s), série max. ${x.maxStreak} match(s) consécutif(s)`).join(' · ')}</div>
+        <div style="margin-top:6px;color:var(--muted)">Le contrôle est informatif : il ne modifie pas les résultats ni le planning. Les matchs anticipés sont vérifiés à leur horaire réel et regroupés avec les matchs simultanés.</div>
+      </div>
+    </details>`;
+  }
   let totalLvDiff=0,matchCount=0,earlyCount=0,relaxCount=0;
   ST.schedule.forEach(rd=>rd.waves.forEach(wv=>{if(wv._isEarlyWave)earlyCount+=wv.matches.length;wv.matches.forEach(m=>{if(m._relaxed)relaxCount++;const lvA=pLv(m.pA1)+pLv(m.pA2),lvB=pLv(m.pB1)+pLv(m.pB2);totalLvDiff+=Math.abs(lvA-lvB);matchCount++;});}));
   const avgLvDiff=matchCount>0?(totalLvDiff/matchCount).toFixed(2):0;
@@ -2290,6 +2443,7 @@ function renderGen(){
     <div class="cc-row"><span class="cc-ico">${dupCount===0?'✅':'⚠️'}</span><span class="cc-lbl">Partenaires uniques</span><span class="cc-badge ${dupCount===0?'ccb-ok':'ccb-warn'}">${dupCount===0?'Aucun doublon':dupCount+' doublon(s)'}</span></div>
     <div class="cc-row"><span class="cc-ico">${relaxCount===0?'✅':'⚠️'}</span><span class="cc-lbl">Contraintes adv. / cooldown</span><span class="cc-badge ${relaxCount===0?'ccb-ok':'ccb-warn'}">${relaxCount===0?'Toutes respectées':relaxCount+' relâché(s)'}</span></div>
     <div class="cc-row"><span class="cc-ico">${maxPlay-minPlay<=1?'✅':'⚠️'}</span><span class="cc-lbl">Équité matchs joués</span><span class="cc-badge ${maxPlay-minPlay<=1?'ccb-ok':'ccb-warn'}">${minPlay}–${maxPlay} matchs</span></div>
+    <div class="cc-row"><span class="cc-ico">${audit.restWarnings.length===0?'✅':'⚠️'}</span><span class="cc-lbl">Un créneau complet de repos entre les matchs</span><span class="cc-badge ${audit.restWarnings.length===0?'ccb-ok':'ccb-warn'}">${audit.restWarnings.length===0?'Respecté':audit.restWarnings.length+' cas à vérifier'}</span></div>
     ${p.wavesPerRound>1?`<div class="cc-row"><span class="cc-ico">${waitOk?'✅':'⚠️'}</span><span class="cc-lbl">Attente max entre 2 matchs</span><span class="cc-badge ${waitOk?'ccb-ok':'ccb-warn'}">${p.wavesPerRound<=1?'N/A (1 vague)':waitOk?'≤ 1 vague ✓':maxWait+' vague(s) — '+waitViolations+' cas'}</span></div>`:''}
     <div class="cc-row"><span class="cc-ico">${+avgLvDiff<1?'✅':+avgLvDiff<2?'ℹ️':'⚠️'}</span><span class="cc-lbl">Équilibre niveau</span><span class="cc-badge ${+avgLvDiff<1?'ccb-ok':+avgLvDiff<2?'ccb-info':'ccb-warn'}">${avgLvDiff} étoile(s)/match</span></div>
     <div class="cc-row"><span class="cc-ico">✅</span><span class="cc-lbl">Horaires</span><span class="cc-badge ccb-info">${start} → ${endTime}</span></div>`;
