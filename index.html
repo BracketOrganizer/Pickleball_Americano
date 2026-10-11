@@ -125,18 +125,30 @@ function handleLiveOpenChange(nowOpen){
   }
 }
 
+// ── Interrupteur admin « Chrono visible sur les mobiles » ───────────────
+// Réglage stocké dans le document de statut Live (déjà écouté par tous : aucune lecture en plus).
+// Décoché : les spectateurs (mobiles) n'écoutent plus le chrono du tout (0 lecture) ;
+// il reste actif pour l'admin / scorer et sur l'écran TV.
+var CHRONO_MOBILE = true, CHRONO_STATUS_KNOWN = false;
+function applyChronoMobileFlag(d) {
+  CHRONO_MOBILE = !d || d.chronoMobile !== false;
+  CHRONO_STATUS_KNOWN = true;
+  const t = document.getElementById('chronoMobileToggle'); if (t) t.checked = CHRONO_MOBILE;
+  try { reconcileChrono(); } catch (e) { /* pas encore initialisé */ }
+}
+
 function startLiveWatch(){
   if(unsubLiveWatch) return;
   unsubLiveWatch = onSnapshot(doc(db,'tournamentStatus','live'), (snap)=>{
     if(!snap.exists()) return;
-    handleLiveOpenChange(snap.data().liveOpen === true);
+    applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   }, (e)=>{ console.warn('startLiveWatch', e); });
   if(!liveWatchIv){
     liveWatchIv = setInterval(async ()=>{
       if (document.hidden) return; // inutile quand l'écran est éteint ou l'onglet masqué
       try {
         const snap = await getDoc(doc(db,'tournamentStatus','live'));
-        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+        if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ console.warn('liveWatch poll error:', e); }
     }, 30000);
   }
@@ -151,7 +163,7 @@ document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
   try {
     const snap = await getDoc(doc(db,'tournamentStatus','live'));
-    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+    if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
 
@@ -3209,7 +3221,7 @@ function computeTimerRemaining(){
 }
 
 function watchTimer(){
-  if(timerUnsub) return;
+  if(timerUnsub || !chronoWanted()) return; // interrupteur admin « Chrono visible sur les mobiles »
   timerUnsub = onSnapshot(doc(db,'tournamentStatus','timer'), (snap)=>{
     timerRetryMs = 3000;
     const d = snap.exists() ? snap.data() : null;
@@ -3348,9 +3360,26 @@ window.clearSharedTimer = function(){
 // Les bips ne fonctionnent sur mobile/TV qu'après un premier geste de l'utilisateur
 ['click','touchend','keydown'].forEach(evt=>document.addEventListener(evt, ()=>{ try{ _getAC(); }catch(e){} }, { passive:true }));
 
+// Chrono : écoute active seulement si nécessaire (interrupteur admin « Chrono visible sur les mobiles »)
+function chronoWanted(){ return isScorer() || ST.page==='TV' || (CHRONO_STATUS_KNOWN && CHRONO_MOBILE); }
+function reconcileChrono(){
+  const want = chronoWanted();
+  if(want && !timerUnsub) watchTimer();
+  if(!want && timerUnsub){ try{ timerUnsub(); }catch(e){} timerUnsub = null; }
+  const panel = document.getElementById('chronoPanel');
+  if(panel){ const d = want ? '' : 'none'; if(panel.style.display !== d) panel.style.display = d; }
+}
+window.toggleChronoMobile = async function () {
+  if (!isAdmin()) return;
+  const t = document.getElementById('chronoMobileToggle');
+  const on = !!(t && t.checked);
+  try { await setDoc(doc(db,'tournamentStatus','live'), { chronoMobile: on }, { merge: true }); }
+  catch (e) { if (t) t.checked = CHRONO_MOBILE; alert('Erreur : ' + (e && e.message ? e.message : e)); }
+};
+
 // Initialisation + horloge d'affichage (500 ms : l'affichage suit au plus près l'heure de fin)
 watchTimer();
-setInterval(()=>{ try { renderTimer(); updateTVTimerBar(); } catch(e){ /* ignore */ } }, 500);
+setInterval(()=>{ try { reconcileChrono(); renderTimer(); updateTVTimerBar(); } catch(e){ /* ignore */ } }, 500);
 
 // ══════════════════════════════════════════════════════════
 // IMPRESSION (identique v5)
@@ -4882,6 +4911,10 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     </div>
   </div>
 
+
+  <div data-role="admin" style="text-align:center;margin:-8px 0 14px;font-size:13px">
+    <label style="cursor:pointer"><input type="checkbox" id="chronoMobileToggle" checked onchange="toggleChronoMobile()"> 📱 Chrono visible sur les mobiles <span style="color:#777">(décoché : aucune lecture pour les spectateurs, le chrono reste sur l'écran TV)</span></label>
+  </div>
   <!-- Info spectateur -->
   <div class="info info-b" id="spectatorInfo" style="display:none;margin-bottom:16px">
     👁 Mode <strong>Spectateur</strong> — vue en lecture seule, mise à jour en temps réel.
