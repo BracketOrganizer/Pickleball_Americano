@@ -2360,6 +2360,8 @@ function auditAmericanoSchedule(){
 // ══════════════════════════════════════════════════════════
 function pName(id){const p=ST.players.find(x=>x.id===id);return p?p.name:'?';}
 function pObj(id){return ST.players.find(x=>x.id===id);}
+// Échappement HTML utilisé par le panneau de contrôle du planning.
+function escHtml(value){return String(value??'').replace(/[&<>\"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]));}
 
 function renderGen(){
   const {n,t,r,mt,tt,tp,start}=ST.cfg;const p=computeScheduleParams(ST.cfg);
