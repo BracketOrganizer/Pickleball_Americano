@@ -1,6 +1,13 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<script>
+  // Auto-rechargement à la première ouverture de chaque session
+  if(!sessionStorage.getItem('_reloaded')){
+    sessionStorage.setItem('_reloaded','1');
+    location.reload(true);
+  }
+</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
@@ -19,7 +26,7 @@ import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
          createUserWithEmailAndPassword, signInWithRedirect, signInWithPopup, getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, disableNetwork, enableNetwork, collection,
-         addDoc, updateDoc, serverTimestamp, query, orderBy, where, runTransaction, waitForPendingWrites }
+         addDoc, updateDoc, serverTimestamp, query, orderBy, where }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -90,110 +97,6 @@ function isResponsable() { return USER_ROLES.includes('responsable'); }
 // Live bloqué = spectateur ET liveOpen pas encore true
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
-// Barre discrète d'état : réseau, sauvegardes et export de sauvegarde.
-let utilityBar = null;
-let saveStateText = 'Prêt';
-const pendingScoreKeys = new Set();
-function setSaveState(text, kind='neutral') {
-  saveStateText = text;
-  const el = document.getElementById('paSaveState');
-  if (el) {
-    el.textContent = text;
-    el.style.color = kind === 'error' ? '#ff8b8b' : kind === 'ok' ? '#8ee6b0' : '#d6dce5';
-  }
-}
-function renderUtilityBar() {
-  if (!utilityBar) {
-    utilityBar = document.createElement('div');
-    utilityBar.id = 'paUtilityBar';
-    utilityBar.style.cssText = 'position:fixed;z-index:9998;left:12px;bottom:12px;display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(18,25,35,.94);box-shadow:0 5px 24px rgba(0,0,0,.25);font:12px system-ui,sans-serif;color:#fff;max-width:calc(100vw - 24px)';
-    utilityBar.innerHTML = '<span id="paNetworkState">● Réseau…</span><span style="opacity:.45">|</span><span id="paSaveState">Prêt</span><button id="paFlushBtn" type="button" style="border:1px solid #607086;border-radius:7px;background:#263548;color:#fff;padding:5px 8px;cursor:pointer">Synchroniser</button><button id="paBackupBtn" type="button" style="display:none;border:1px solid #607086;border-radius:7px;background:#263548;color:#fff;padding:5px 8px;cursor:pointer">Sauvegarde JSON</button>';
-    document.body.appendChild(utilityBar);
-    document.getElementById('paFlushBtn').addEventListener('click', async () => {
-      const btn = document.getElementById('paFlushBtn');
-      btn.disabled = true; setSaveState('Synchronisation…');
-      try {
-        await flushPendingScoreInputs();
-        await waitForPendingWrites(db);
-        setSaveState('Données synchronisées', 'ok');
-      } catch (e) { console.error('Synchronisation', e); setSaveState('Échec — vérifier la connexion', 'error'); }
-      finally { btn.disabled = false; }
-    });
-    document.getElementById('paBackupBtn').addEventListener('click', exportCoreBackup);
-    const updateNetwork = () => {
-      const n = document.getElementById('paNetworkState');
-      if (n) { n.textContent = navigator.onLine ? '● En ligne' : '● Hors ligne'; n.style.color = navigator.onLine ? '#8ee6b0' : '#ffca80'; }
-    };
-    window.addEventListener('online', updateNetwork);
-    window.addEventListener('offline', updateNetwork);
-    updateNetwork();
-  }
-  const show = !!CURRENT_USER && (isAdmin() || isScorer());
-  utilityBar.style.display = show ? 'flex' : 'none';
-  const backup = document.getElementById('paBackupBtn');
-  if (backup) backup.style.display = isAdmin() ? '' : 'none';
-  setSaveState(saveStateText);
-}
-async function exportCoreBackup() {
-  if (!isAdmin()) { alert('Sauvegarde réservée à l’administrateur.'); return; }
-  const btn = document.getElementById('paBackupBtn');
-  if (btn) btn.disabled = true;
-  setSaveState('Préparation sauvegarde…');
-  try {
-    // Export en lecture seule : aucun document n'est modifié ni restauré automatiquement.
-    const [tournamentSnap, resultsSnap, liveSnap, timerSnap] = await Promise.all([
-      getDoc(doc(db, 'tournament', 'current')),
-      getDocs(collection(db, 'results')),
-      getDoc(doc(db, 'tournamentStatus', 'live')),
-      getDoc(doc(db, 'tournamentStatus', 'timer'))
-    ]);
-    const serialize = snap => snap.exists() ? snap.data() : null;
-    const results = {};
-    resultsSnap.forEach(d => { results[d.id] = d.data(); });
-    const payload = {
-      format: 'pickleball-americano-backup',
-      version: 1,
-      createdAt: new Date().toISOString(),
-      projectId: firebaseConfig.projectId,
-      note: 'Sauvegarde des données principales du tournoi. Ce fichier ne contient pas les inscriptions, les comptes utilisateurs ni les règles Firebase.',
-      tournament: serialize(tournamentSnap),
-      results,
-      tournamentStatus: { live: serialize(liveSnap), timer: serialize(timerSnap) }
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pickleball-americano-sauvegarde-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    setSaveState('Sauvegarde téléchargée', 'ok');
-  } catch (e) {
-    console.error('Export sauvegarde', e);
-    setSaveState('Sauvegarde impossible', 'error');
-    alert('Impossible de créer la sauvegarde : ' + (e.message || e));
-  } finally { if (btn) btn.disabled = false; }
-}
-async function flushPendingScoreInputs() {
-  // Le suivi ne dépend pas des champs DOM : la navigation peut avoir détruit
-  // les inputs alors qu'une sauvegarde différée était encore en attente.
-  document.querySelectorAll('.sinp[data-match]').forEach(el => {
-    if (el._saveTimer) { clearTimeout(el._saveTimer); el._saveTimer = null; }
-  });
-  const pending = [...pendingScoreKeys].map(key => key.split('-').map(Number))
-    .filter(parts => parts.length === 3 && parts.every(Number.isFinite));
-  for (const [r,w,m] of pending) {
-    const saved = await window.scoreFlush(r,w,m);
-    if (saved === false) throw new Error('Au moins un score n’a pas pu être enregistré.');
-  }
-}
-window.addEventListener('online', () => setSaveState('Connexion rétablie — synchronisation…'));
-window.addEventListener('offline', () => setSaveState('Hors ligne — sauvegardes à vérifier', 'error'));
-window.addEventListener('pagehide', () => {
-  // Tentative de dernier envoi, sans prétendre qu'un navigateur garantit
-  // l'achèvement d'une requête pendant la fermeture de l'onglet.
-  flushPendingScoreInputs().catch(e => console.warn('Dernière synchronisation', e));
-});
-
 function handleLiveOpenChange(nowOpen){
   const wasOpen = ST.liveOpen;
   ST.liveOpen = nowOpen;
@@ -258,7 +161,6 @@ startLiveWatch();
 
 document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
-  try { await flushPendingScoreInputs(); } catch(e) { console.warn('flush scores après retour', e); }
   try {
     const snap = await getDoc(doc(db,'tournamentStatus','live'));
     if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
@@ -306,7 +208,6 @@ onAuthStateChanged(auth, async (user)=>{
     await ensureUserDoc(user);
     const profile = await getUserProfile(user.uid);
     USER_ROLES = profile.roles;
-    renderUtilityBar();
     RESP_PROFILE = { clubName: profile.clubName || profile.name || 'Mon club', name: profile.name||'', maxPlayers: profile.maxPlayers||0 };
     const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
     const hasResp  = USER_ROLES.includes('responsable');
@@ -314,7 +215,6 @@ onAuthStateChanged(auth, async (user)=>{
     // avec en plus un accès direct à son espace club s'il a aussi le rôle "responsable".
     if(hasStaff){
       USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : 'scorer';
-      renderUtilityBar();
       showApp();
       subscribeToTournament();
       subscribeToResults();
@@ -325,13 +225,11 @@ onAuthStateChanged(auth, async (user)=>{
     // Responsable club (seul rôle) : écran dédié d'inscription, pas d'accès à l'appli tournoi
     if(hasResp){
       USER_ROLE = 'responsable';
-      renderUtilityBar();
       await showResponsableScreen();
       return;
     }
     // Spectateur : bloquer si le live n'est pas ouvert
     USER_ROLE = 'spectator';
-    renderUtilityBar();
     try {
       const snap = await getDoc(doc(db,'tournamentStatus','live'));
       if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
@@ -350,7 +248,6 @@ onAuthStateChanged(auth, async (user)=>{
   } else {
     CURRENT_USER = null;
     USER_ROLE    = null;
-    renderUtilityBar();
     USER_ROLES   = [];
     unsubAll();
     // Charger liveOpen depuis Firestore avant d'afficher l'écran de connexion
@@ -1288,25 +1185,20 @@ function subscribeToResults(){
 // FIRESTORE — ÉCRITURES
 // ══════════════════════════════════════════════════════════
 async function saveTournament(fields){
-  setSaveState('Enregistrement du tournoi…');
-  // Vérifier les droits avant toute écriture, y compris l'état du live.
-  // Les règles de sécurité Firestore doivent également appliquer cette restriction côté serveur.
-  if(!isAdmin()){ setSaveState('Droits insuffisants', 'error'); alert("Action réservée à l'admin."); return; }
   if('liveOpen' in fields){
     try { await setDoc(doc(db,'tournamentStatus','live'), { liveOpen: fields.liveOpen }, { merge:true }); }
     catch(e){ console.warn('saveTournament status', e); }
   }
+  if(!isAdmin()){ alert("Action réservée à l'admin."); return; }
   try {
     await setDoc(doc(db,'tournament','current'),{
       ...fields, updatedAt: serverTimestamp()
     },{ merge:true });
-    setSaveState('Tournoi enregistré', 'ok');
-  } catch(e){ setSaveState('Échec sauvegarde tournoi', 'error'); alert('Erreur sauvegarde : '+e.message); }
+  } catch(e){ alert('Erreur sauvegarde : '+e.message); }
 }
 
 async function saveResult(key, ga, gb){
-  if(!isScorer()){ setSaveState('Droits insuffisants', 'error'); alert('Action réservée aux scorers et admins.'); return false; }
-  setSaveState('Enregistrement du score…');
+  if(!isScorer()){ alert('Action réservée aux scorers et admins.'); return; }
   try {
     if(ga===''&&gb===''){
       // Les deux champs vidés → supprimer le document (annulation complète du score)
@@ -1321,9 +1213,7 @@ async function saveResult(key, ga, gb){
       });
       await auditLog('save_result',{ key, ga, gb });
     }
-    setSaveState('Score enregistré', 'ok');
-    return true;
-  } catch(e){ setSaveState('Échec sauvegarde score', 'error'); alert('Erreur sauvegarde score : '+e.message); return false; }
+  } catch(e){ alert('Erreur sauvegarde score : '+e.message); }
 }
 
 async function auditLog(action, details){
@@ -1349,9 +1239,9 @@ window.editPlayerName = async function(idx){
   const target = spans[0];
   if(!target) {
     // Fallback si pas de data-playeridx trouvé
-    const newName = prompt('Nouveau nom (40 caractères maximum) :', p.name);
+    const newName = prompt('Nouveau nom :', p.name);
     if(!newName || !newName.trim() || newName.trim()===p.name) return;
-    await _savePlayerName(idx, newName.trim().slice(0, 40));
+    await _savePlayerName(idx, newName.trim());
     return;
   }
   const oldName = p.name;
@@ -1379,32 +1269,13 @@ window.editPlayerName = async function(idx){
   });
 };
 async function _savePlayerName(idx, newName){
-  const localPlayer = ST.players[idx];
-  if (!localPlayer || !newName || !newName.trim()) return;
-  const playerId = localPlayer.id;
-  const cleanName = newName.trim().slice(0, 40);
-  setSaveState('Enregistrement du nom…');
+  ST.players[idx].name = newName;
   try {
-    // Relire la version serveur et modifier uniquement le joueur ciblé : évite
-    // d'écraser les changements d'autres utilisateurs avec un ancien ST.players.
-    await runTransaction(db, async (transaction) => {
-      const ref = doc(db, 'tournament', 'current');
-      const snap = await transaction.get(ref);
-      if (!snap.exists()) throw new Error('Aucun tournoi enregistré.');
-      const data = snap.data();
-      const players = Array.isArray(data.players) ? data.players.map(p => ({...p})) : [];
-      const target = players.find(p => p.id === playerId);
-      // Ne jamais se rabattre sur l'index : après une modification concurrente,
-      // cet index pourrait désigner un autre joueur.
-      if (!target) throw new Error('Ce joueur n’existe plus dans le tournoi actuel. Recharge la liste et réessaie.');
-      target.name = cleanName;
-      transaction.set(ref, { players, updatedAt: serverTimestamp() }, { merge: true });
-    });
-    const currentLocalPlayer = ST.players.find(p => p.id === playerId);
-    if (currentLocalPlayer) currentLocalPlayer.name = cleanName;
-    await auditLog('edit_player_name',{ idx, playerId, newName: cleanName });
-    setSaveState('Nom enregistré', 'ok');
-  } catch(e){ setSaveState('Échec sauvegarde du nom', 'error'); alert('Erreur : '+e.message); }
+    await setDoc(doc(db,'tournament','current'),{
+      players: ST.players, updatedAt: serverTimestamp()
+    },{ merge:true });
+    await auditLog('edit_player_name',{ idx, newName });
+  } catch(e){ alert('Erreur : '+e.message); }
   renderPlayers();
   if(ST.page===4) renderMatches();
 }
@@ -1666,7 +1537,6 @@ window.scoreInput = function(el, r, w, m, f){
   el.value = raw; // nettoie les caractères non numériques
   const v = raw === '' ? '' : parseInt(raw, 10);
   const key = r+'-'+w+'-'+m;
-  pendingScoreKeys.add(key);
   const cur = Object.assign({ga:'',gb:''}, ST.results[key]||{});
   if(cur.ga==null) cur.ga=''; if(cur.gb==null) cur.gb='';
   cur[f] = v;
@@ -1696,14 +1566,12 @@ window.scoreFlush = async function(r, w, m){
   document.querySelectorAll(`.sinp[data-match="${r}-${w}-${m}"]`).forEach(el=>{
     clearTimeout(el._saveTimer);
   });
-  const saved = await saveResult(key, cur.ga, cur.gb);
-  if (saved) pendingScoreKeys.delete(key);
+  await saveResult(key, cur.ga, cur.gb);
   // Après re-render, les anciens éléments sont détruits — reset quand même pour sécurité
   document.querySelectorAll(`.sinp[data-match="${r}-${w}-${m}"]`).forEach(inp=>{
     inp._overwrite = false; inp._prevRaw = inp.value;
   });
   renderRoundTabs(); renderMatches(); renderMiniStandings(); checkDone();
-  return saved;
 };
 
 // ── Navigation : Enter sauvegarde immédiatement et passe au suivant ──
@@ -2063,6 +1931,9 @@ function isMatchValid(pA1,pA2,pB1,pB2,pairCount,oppCount,lastPartnerRound,curren
 // GÉNÉRATION DES MATCHS pour un groupe
 // Cherche la meilleure combinaison : rotation + mixité + niveau
 // ─────────────────────────────────────────────────────────────
+// Budget de temps de la génération du planning : au-delà, les contraintes strictes (partenaires/adversaires
+// jamais répétés…) sont assouplies d'un coup au lieu d'être cherchées indéfiniment, ce qui figeait la page.
+var _schedDeadline=0;
 function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRound,cfg){
   if(group.length<4)return[];
   const n=group.length,bal=cfg.bal;
@@ -2070,12 +1941,13 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
   const strictLevel=(bal==='level'||bal==='both');
 
   for(let relaxMode=0;relaxMode<=4;relaxMode++){
+    if(_schedDeadline&&relaxMode<4&&Date.now()>_schedDeadline) relaxMode=4; // budget dépassé : on passe au mode le plus souple
     const enforceGender=strictGender&&relaxMode<3;
     let bestMatches=null,bestScore=Infinity;
-    // Recherche bornée : évite que les boucles combinatoires bloquent le navigateur.
-    const maxAttempts=relaxMode===0?8:relaxMode===1?4:relaxMode===2?3:relaxMode===3?2:1;
+    const maxAttempts=relaxMode===0?30:relaxMode<=2?15:8;
 
     for(let attempt=0;attempt<maxAttempts;attempt++){
+      if(attempt>0&&relaxMode<4&&_schedDeadline&&Date.now()>_schedDeadline) break; // budget dépassé
       // Trier le groupe selon mixité+niveau avant de l'explorer
       let sorted;
       if(bal==='both'||bal==='gender'){
@@ -2102,10 +1974,9 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
         if(avail.length<4)break;
         let bestM=null,bestMSc=Infinity;
 
-        // Essayer plusieurs ancres, avec une limite stricte de combinaisons examinées.
-        // Sans cette limite, les boucles imbriquées peuvent figer la page Planning.
-        let examinedCandidates=0;
-        candidateSearch: for(let a1idx=0;a1idx<avail.length&&!bestM;a1idx++){
+        // Essayer chaque joueur disponible comme ancre a1 (pas seulement avail[0])
+        // Évite l'échec greedy quand le premier joueur est bloquant
+        for(let a1idx=0;a1idx<avail.length&&!bestM;a1idx++){
           const a1=avail[a1idx];
           for(let i=0;i<avail.length;i++){
             if(i===a1idx)continue;const a2=avail[i];
@@ -2113,7 +1984,6 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
               if(j===a1idx||j===i)continue;const b1=avail[j];
               for(let k=j+1;k<avail.length;k++){
                 if(k===a1idx||k===i)continue;const b2=avail[k];
-                if(++examinedCandidates>500) break candidateSearch;
                 let valid=true;
                 if(relaxMode===0) valid=isMatchValid(a1,a2,b1,b2,pairCount,oppCount,lastPartnerRound,currentRound);
                 else if(relaxMode===1){
@@ -2191,9 +2061,10 @@ function sortForSubs(ids,playCount,byeCount){
   });
 }
 
-function buildSchedule(maxAttempts=6){
+function buildSchedule(maxAttempts=24){
   const cfg=getCfg();if(cfg.n<4){alert('Il faut au moins 4 joueurs.');return false;}
   ST.cfg=cfg;
+  _schedDeadline=Date.now()+3000; // budget : 3 s de recherche stricte, ensuite contraintes assouplies
   const N=cfg.n,T=cfg.t,R=cfg.r;
   // Vagues : forcées ou automatiques
   const forcedWaves = cfg.waves && cfg.waves > 0;
@@ -2214,6 +2085,7 @@ function buildSchedule(maxAttempts=6){
   let bestSched=null,bestScore=Infinity;
 
   for(let att=0;att<maxAttempts;att++){
+    if(att>0&&Date.now()>_schedDeadline) break; // assez cherché : on garde le meilleur planning trouvé
     const pairCount={},oppCount={},lastPartnerRound={},byeCount={},playCount={};
     // lastWaveIdx[id] = indice de la dernière vague jouée par ce joueur (au tour précédent)
     // Permet de prioriser ceux qui ont joué en dernière vague → ils attendent le plus
@@ -2335,29 +2207,14 @@ function buildSchedule(maxAttempts=6){
     const normalWaveCount=normalWaves.length;const roundDur=normalWaveCount*cfg.mt+(normalWaveCount-1)*cfg.tt;
     currentTime=addMinutes(currentTime,roundDur+(ri<bestSched.length-1?cfg.tp:0));
   });
+  _schedDeadline=0;
   ST.schedule=bestSched;ST.results={};ST.activeRound=0;return true;
 }
 
 window.regenerateLocal = async function(){
-  if(!isAdmin()) return;
-  if(ST._generatingSchedule) return;
-  ST._generatingSchedule=true;
-  const btn=document.querySelector('#page3 button[onclick="regenerateLocal()"]');
-  const oldLabel=btn?btn.textContent:'';
-  if(btn){btn.disabled=true;btn.textContent='⏳ Génération…';btn.style.opacity='.7';}
-  try{
-    // Laisse le navigateur afficher l'indicateur avant le calcul.
-    await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-    if(buildSchedule()){
-      await saveTournament({ schedule: ST.schedule, activeRound: 0 });
-      renderGen();
-    }
-  }catch(e){
-    console.error('Erreur de génération du planning',e);
-    alert('La génération du planning a échoué. Le planning précédent est conservé si la génération n’a pas abouti. Réessaie avec moins de contraintes ou contacte l’administrateur.');
-  }finally{
-    ST._generatingSchedule=false;
-    if(btn){btn.disabled=false;btn.textContent=oldLabel||'🔀 Régénérer';btn.style.opacity='';}
+  if(buildSchedule()){
+    await saveTournament({ schedule: ST.schedule, activeRound: 0 });
+    renderGen();
   }
 };
 
