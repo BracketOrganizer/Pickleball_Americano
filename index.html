@@ -2012,7 +2012,22 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
                 // Mixité obligatoire si possible
                 if(valid&&enforceGender) valid=isMixForced(a1,a2,b1,b2);
                 if(!valid)continue;
-                const msc=matchScore(a1,a2,b1,b2,bal);
+                // En mode assoupli, ne pas choisir arbitrairement le premier match valide :
+                // pénaliser fortement les adversaires déjà rencontrés et encore plus les partenaires répétés.
+                // Cela répartit les répétitions au lieu de les concentrer toujours sur les mêmes personnes.
+                let msc=matchScore(a1,a2,b1,b2,bal);
+                const partnerKeys=[pk(a1,a2),pk(b1,b2)];
+                const opponentKeys=[pk(a1,b1),pk(a1,b2),pk(a2,b1),pk(a2,b2)];
+                for(const key of partnerKeys){
+                  const n=(pairCount[key]||0);
+                  if(n>0) msc+=n*12000;
+                  const last=lastPartnerRound[key];
+                  if(last!==undefined&&currentRound-last<=1) msc+=2500;
+                }
+                for(const key of opponentKeys){
+                  const n=(oppCount[key]||0);
+                  if(n>0) msc+=n*3000;
+                }
                 if(msc<bestMSc){bestMSc=msc;bestM={pA1:a1,pA2:a2,pB1:b1,pB2:b2};}
               }
             }
@@ -2072,10 +2087,10 @@ function sortForSubs(ids,playCount,byeCount){
   });
 }
 
-function buildSchedule(maxAttempts=8){
+function buildSchedule(maxAttempts=20){
   const cfg=getCfg();if(cfg.n<4){alert('Il faut au moins 4 joueurs.');return false;}
   ST.cfg=cfg;
-  _schedDeadline=Date.now()+3000; // budget : 3 s de recherche stricte, ensuite contraintes assouplies
+  _schedDeadline=Date.now()+8000; // budget plus large pour comparer davantage de rotations complètes
   const N=cfg.n,T=cfg.t,R=cfg.r;
   // Vagues : forcées ou automatiques
   const forcedWaves = cfg.waves && cfg.waves > 0;
@@ -2136,7 +2151,10 @@ function buildSchedule(maxAttempts=8){
       // Les joueurs ayant joué en DERNIÈRE vague au tour précédent sont prioritaires
       // pour jouer en PREMIÈRE vague à ce tour (ils ont attendu le plus longtemps).
       const activeRaw=orderedIds.filter(id=>!subsSet.has(id)&&!alreadyEarly.has(id));
-      const active=shuffle(activeRaw).sort((a,b)=>lastWaveIdx[b]-lastWaveIdx[a]);
+      // Important : ne pas envoyer systématiquement les joueurs de la dernière vague en première vague.
+      // La dernière vague d'un tour et la première du suivant sont deux créneaux consécutifs.
+      // On conserve donc autant que possible les joueurs tardifs dans les vagues tardives.
+      const active=shuffle(activeRaw).sort((a,b)=>lastWaveIdx[a]-lastWaveIdx[b]);
 
       const waves=[];let offset=0;
       for(let w=0;w<wavesPerRound;w++){
