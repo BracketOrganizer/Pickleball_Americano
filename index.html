@@ -1478,13 +1478,24 @@ window.clearPl = async function(){
 };
 window.autoFill = async function(){
   if(!isAdmin()) return;
-  const req=ST.cfg.n;
-  for(let i=0;i<req-ST.players.length;i++){
-    const male=(ST.players.length+i)%2===0;
+  // Calculer le nombre manquant une seule fois : ST.players.length augmente
+  // à chaque ajout et ne doit pas être recalculé dans la condition de boucle.
+  const req=Math.max(0,Number(ST.cfg.n)||0);
+  const missing=Math.max(0,req-ST.players.length);
+  if(!missing){renderPlayers();return;}
+  const used=new Set(ST.players.map(p=>String(p.name||'').trim().toLocaleLowerCase('fr')));
+  const stamp=Date.now();
+  for(let i=0;i<missing;i++){
+    const absoluteIndex=ST.players.length;
+    const male=absoluteIndex%2===0;
     const nms=male?NMS_M:NMS_F;
-    const used=ST.players.map(p=>p.name);
-    const nm=nms.find(x=>!used.includes(x))||(male?'Joueur':'Joueuse')+(ST.players.length+i+1);
-    ST.players.push({id:'p'+Date.now()+i,name:nm,lv:Math.ceil(Math.random()*5),g:male?'M':'F'});
+    let nm=nms.find(x=>!used.has(String(x).trim().toLocaleLowerCase('fr')));
+    if(!nm){
+      let suffix=absoluteIndex+1;
+      do{nm=(male?'Joueur ':'Joueuse ')+suffix++;}while(used.has(nm.toLocaleLowerCase('fr')));
+    }
+    used.add(String(nm).trim().toLocaleLowerCase('fr'));
+    ST.players.push({id:'p'+stamp+'_'+i+'_'+Math.random().toString(36).slice(2,8),name:nm,lv:Math.ceil(Math.random()*5),g:male?'M':'F'});
   }
   renderPlayers();
   await saveTournament({ players: ST.players });
@@ -1944,7 +1955,7 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
     if(_schedDeadline&&relaxMode<4&&Date.now()>_schedDeadline) relaxMode=4; // budget dépassé : on passe au mode le plus souple
     const enforceGender=strictGender&&relaxMode<3;
     let bestMatches=null,bestScore=Infinity;
-    const maxAttempts=relaxMode===0?12:relaxMode<=2?6:1; // limiter les recherches coûteuses
+    const maxAttempts=relaxMode===0?3:relaxMode<=2?2:1; // garder du temps pour évaluer plusieurs plannings complets
 
     for(let attempt=0;attempt<maxAttempts;attempt++){
       if(attempt>0&&_schedDeadline&&Date.now()>_schedDeadline) break; // budget global dépassé
@@ -2197,10 +2208,20 @@ function buildSchedule(maxAttempts=8){
     // Priorités : aucune collision, puis un créneau complet de repos, puis les
     // contraintes de rotation des partenaires/adversaires.
     const restQuality = scoreAmericanoSchedule(sched, wavesPerRound);
-    const score = restQuality.collisions*1000000000 + restQuality.restViolations*1000000 + totalRelax*1000 + restQuality.maxStreak;
+    // Ordre de priorité : pas de collision, moins de repos consécutifs,
+    // répartir équitablement les contraintes restantes, puis limiter les répétitions.
+    const score = restQuality.collisions*1e12
+      + restQuality.restViolations*1e8
+      + restQuality.streakConcentration*1e6
+      + restQuality.maxStreak*1e5
+      + restQuality.partnerRepeatExcess*1e4
+      + restQuality.maxPartnerRepeat*1e3
+      + restQuality.opponentRepeatExcess*100
+      + restQuality.maxOpponentRepeat*10
+      + totalRelax;
     if(score<bestScore){
       bestScore=score;bestSched=sched;
-      if(totalRelax===0 && restQuality.collisions===0 && restQuality.restViolations===0) break;
+      if(totalRelax===0 && restQuality.collisions===0 && restQuality.restViolations===0 && restQuality.partnerRepeatExcess===0 && restQuality.opponentRepeatExcess===0) break;
     }
   }
 
@@ -2219,9 +2240,24 @@ function buildSchedule(maxAttempts=8){
 }
 
 window.regenerateLocal = async function(){
-  if(buildSchedule()){
-    await saveTournament({ schedule: ST.schedule, activeRound: 0 });
-    renderGen();
+  const buttons=[document.getElementById('btnRegenerateTop')];
+  if(window._regeneratingAmericano)return;
+  window._regeneratingAmericano=true;
+  buttons.filter(Boolean).forEach(b=>{b.disabled=true;b.dataset.oldText=b.textContent;b.textContent='⏳ Génération en cours…';});
+  try{
+    // Laisser le navigateur afficher l'indicateur avant le calcul du planning.
+    await new Promise(resolve=>setTimeout(resolve,40));
+    if(buildSchedule()){
+      await saveTournament({ schedule: ST.schedule, activeRound: 0 });
+      renderGen();
+    }
+  }catch(err){
+    console.error('Erreur pendant la régénération du planning :',err);
+    alert('La régénération du planning a échoué. Vérifie la console du navigateur pour le détail.');
+  }finally{
+    window._regeneratingAmericano=false;
+    const b=document.getElementById('btnRegenerateTop');
+    if(b){b.disabled=false;b.textContent='🔀 Régénérer le planning';}
   }
 };
 
@@ -2230,6 +2266,7 @@ window.regenerateLocal = async function(){
 function scoreAmericanoSchedule(schedule, wavesPerRound){
   const cfg=ST.cfg||getCfg();
   const playerSlots=new Map(),usedBySlot=new Map(),waveTimes=new Map(); let collisions=0;
+  const partnerCounts=new Map(),opponentCounts=new Map();
   // Reconstituer les horaires réels comme ils seront affichés après la génération.
   let currentTime=cfg.start;
   schedule.forEach((rd,ri)=>{
@@ -2249,30 +2286,44 @@ function scoreAmericanoSchedule(schedule, wavesPerRound){
   const toMinutes=t=>{const m=String(t||'').match(/^(\d{1,2}):(\d{2})$/);return m?Number(m[1])*60+Number(m[2]):0;};
   const times=[...new Set([...waveTimes.values()])].sort((a,b)=>toMinutes(a)-toMinutes(b));
   const slotByTime=new Map(times.map((time,i)=>[time,i]));
+  const addCount=(map,a,b)=>{const key=pk(a,b);map.set(key,(map.get(key)||0)+1);};
   schedule.forEach(rd=>rd.waves.forEach(wv=>{
     const slot=slotByTime.get(waveTimes.get(wv));
     if(!usedBySlot.has(slot))usedBySlot.set(slot,new Set());
     const used=usedBySlot.get(slot);
     (wv.matches||[]).forEach(m=>{
-      [m.pA1,m.pA2,m.pB1,m.pB2].forEach(id=>{
+      const ids=[m.pA1,m.pA2,m.pB1,m.pB2];
+      ids.forEach(id=>{
         if(used.has(id))collisions++;
         used.add(id);
         if(!playerSlots.has(id))playerSlots.set(id,new Set());
         playerSlots.get(id).add(slot);
       });
+      addCount(partnerCounts,m.pA1,m.pA2);addCount(partnerCounts,m.pB1,m.pB2);
+      [[m.pA1,m.pB1],[m.pA1,m.pB2],[m.pA2,m.pB1],[m.pA2,m.pB2]].forEach(([a,b])=>addCount(opponentCounts,a,b));
     });
   }));
-  let restViolations=0,maxStreak=0;
+  let restViolations=0,maxStreak=0,streakConcentration=0;
   playerSlots.forEach(set=>{
-    const seq=[...set].sort((a,b)=>a-b);let streak=seq.length?1:0;
+    const seq=[...set].sort((a,b)=>a-b);let streak=seq.length?1:0,violationsForPlayer=0;
     for(let i=1;i<seq.length;i++){
-      if(seq[i]-seq[i-1]===1){restViolations++;streak++;}
+      if(seq[i]-seq[i-1]===1){restViolations++;violationsForPlayer++;streak++;}
       else streak=1;
       maxStreak=Math.max(maxStreak,streak);
     }
     maxStreak=Math.max(maxStreak,streak);
+    // Le carré pénalise les longues séries concentrées sur quelques personnes.
+    streakConcentration+=violationsForPlayer*violationsForPlayer;
   });
-  return {collisions,restViolations,maxStreak};
+  const repeatMetrics=map=>{
+    let excess=0,max=0;
+    map.forEach(n=>{if(n>1)excess+=n-1;max=Math.max(max,n);});
+    return {excess,max};
+  };
+  const pr=repeatMetrics(partnerCounts),orr=repeatMetrics(opponentCounts);
+  return {collisions,restViolations,maxStreak,streakConcentration,
+    partnerRepeatExcess:pr.excess,maxPartnerRepeat:pr.max,
+    opponentRepeatExcess:orr.excess,maxOpponentRepeat:orr.max};
 }
 
 // Contrôle détaillé du planning : ne modifie jamais les matchs générés.
@@ -2402,7 +2453,8 @@ function renderGen(){
         <div style="margin-top:7px"><strong>Matchs et repos par joueur :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s), série max. ${x.maxStreak} match(s) consécutif(s)`).join(' · ')}</div>
         <div style="margin-top:6px;color:var(--muted)">Le contrôle est informatif : il ne modifie pas les résultats ni le planning. Les matchs anticipés sont vérifiés à leur horaire réel et regroupés avec les matchs simultanés.</div>
       </div>
-    </details>`;
+    </details>
+    <div style="display:flex;justify-content:flex-start;margin-top:10px"><button class="btn btn-ghost btn-sm" id="btnRegenerateTop" onclick="regenerateLocal()">🔀 Régénérer le planning</button></div>`;
   }
   let totalLvDiff=0,matchCount=0,earlyCount=0,relaxCount=0;
   ST.schedule.forEach(rd=>rd.waves.forEach(wv=>{if(wv._isEarlyWave)earlyCount+=wv.matches.length;wv.matches.forEach(m=>{if(m._relaxed)relaxCount++;const lvA=pLv(m.pA1)+pLv(m.pA2),lvB=pLv(m.pB1)+pLv(m.pB2);totalLvDiff+=Math.abs(lvA-lvB);matchCount++;});}));
@@ -5046,7 +5098,6 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     <div id="schedPreview"></div>
   </div>
   <div class="flex g8 mt16">
-    <button class="btn btn-ghost btn-sm" onclick="regenerateLocal()">🔀 Régénérer</button>
     <button class="btn btn-b btn-sm" onclick="printPlanning()">🖨 Imprimer le planning</button>
     <button class="btn btn-b btn-sm" onclick="printAllPlayersSchedule()">🖨 Programmes individuels</button>
     <button class="btn btn-g" onclick="startTournament()">▶ Démarrer le tournoi →</button>
