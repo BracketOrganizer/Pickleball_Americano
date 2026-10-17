@@ -358,6 +358,7 @@ function subscribeToTournamentPublic(){
     if(data.players)  ST.players  = data.players;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
+    if(data.status!=null) ST.tStatus = data.status;
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
@@ -1158,6 +1159,7 @@ function subscribeToTournament(){
     if(data.players)  ST.players  = data.players;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
+    if(data.status!=null) ST.tStatus = data.status;
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===3) renderGen();
     if(ST.page===4) renderTournament();
@@ -1630,23 +1632,46 @@ window.setRound = async function(r){
 // ══════════════════════════════════════════════════════════
 // PLANNING / TOURNOI (admin uniquement)
 // ══════════════════════════════════════════════════════════
+async function clearAllResults(){
+  try {
+    const { getDocs, collection: col2, deleteDoc: delDoc2, doc: doc2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+    const snap = await getDocs(col2(db,'results'));
+    await Promise.all(snap.docs.map(d => delDoc2(doc2(db,'results',d.id))));
+    ST.results = {};
+    return true;
+  } catch(e){ alert('Erreur lors de l\'effacement des scores : '+e.message); return false; }
+}
+function hasAnyScore(){ return Object.values(ST.results||{}).some(r=>r&&(r.ga!==''&&r.ga!=null||r.gb!==''&&r.gb!=null)); }
+// Garde-fou : refaire le planning alors que le tournoi est lancé efface les scores.
+async function confirmDiscardScores(){
+  if(!(hasAnyScore() || ST.tStatus==='active')) return true;
+  if(!confirm('⚠️ Le tournoi est déjà lancé'+(hasAnyScore()?' et des scores sont saisis':'')+'.\nRefaire le planning EFFACERA tous les scores. Continuer ?')) return false;
+  if(!confirm('Dernière confirmation : effacer les scores et refaire le planning ?')) return false;
+  return await clearAllResults();
+}
 window.startTournament = async function(){
   if(!isAdmin()) return;
-  // Utiliser le planning déjà généré (page 3) — ne PAS régénérer aléatoirement
+  if(hasAnyScore() || ST.tStatus==='active'){
+    if(!confirm('Le tournoi est déjà lancé. Relancer EFFACERA tous les scores. Continuer ?')) return;
+  }
   if(!ST.schedule || ST.schedule.length === 0){
     if(!buildSchedule()) return;
   }
-  ST.results = {}; ST.activeRound = 0;
+  if(!(await clearAllResults())) return;
+  ST.activeRound = 0; ST.tStatus='active';
   await saveTournament({ schedule: ST.schedule, activeRound:0, status:'active', results:{} });
   goTo(4);
 };
 window.regenerate = async function(){
   if(!isAdmin()) return;
+  if(!(await confirmDiscardScores())) return;
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
 window.newTournament = async function(){  if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
+  await clearAllResults();
+  ST.tStatus='setup';
   ST.players=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   try { clearSharedTimer(); } catch(e){}
@@ -2258,6 +2283,7 @@ function buildSchedule(maxAttempts=20){
 }
 
 window.regenerateLocal = async function(){
+  if(!(await confirmDiscardScores())) return;
   const buttons=[document.getElementById('btnRegenerateTop')];
   if(window._regeneratingAmericano)return;
   window._regeneratingAmericano=true;
