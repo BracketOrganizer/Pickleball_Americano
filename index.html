@@ -2174,10 +2174,87 @@ function sortForSubs(ids,playCount,byeCount){
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// OPTIMISATION GLOBALE (recuit simulé) — v17
+// Part du planning glouton (qui joue à quel tour / quelle vague) et ré-organise les équipes et adversaires
+// sur TOUTE la journée à la fois : partenaires jamais répétés, adversaires répétés le moins possible,
+// équipes mixtes, niveaux équilibrés, repos. Ne change ni le nombre de matchs par joueur, ni les remplaçants.
+// ─────────────────────────────────────────────────────────────
+function optimizeScheduleSA(sched,cfg,budgetMs){
+  const bal=cfg.bal,gen=(bal==='gender'||bal==='both'),lev=(bal==='level'||bal==='both');
+  const WP=12000,WO=3000,WM=6000,WR=12000;
+  const M=[],slotOf=[],gOf=[],groups=[],gIdx={};let base=0,multi=false;
+  sched.forEach((rd,r)=>{
+    const normal=rd.waves.filter(w=>!w._isEarlyWave); if(normal.length>1) multi=true;
+    rd.waves.forEach(wv=>{
+      const early=!!wv._isEarlyWave;
+      const wi=early?(wv._parentWaveIdx!=null?Number(wv._parentWaveIdx):normal.length-1):normal.indexOf(wv);
+      const key=early?'e'+r+':'+wi:'n'+r;
+      if(gIdx[key]===undefined){gIdx[key]=groups.length;groups.push([]);}
+      (wv.matches||[]).forEach(m=>{const i=M.length;M.push(m);slotOf.push(base+wi);gOf.push(gIdx[key]);groups[gIdx[key]].push(i);});
+    });
+    base+=normal.length;
+  });
+  if(!M.length) return;
+  const ids=[...new Set(M.flatMap(m=>[m.pA1,m.pA2,m.pB1,m.pB2]))],ix=new Map(ids.map((id,k)=>[id,k])),N=ids.length;
+  const g=ids.map(id=>pGender(id)),lv=ids.map(id=>pLv(id));
+  const P=new Int32Array(4*M.length);
+  M.forEach((m,i)=>{P[4*i]=ix.get(m.pA1);P[4*i+1]=ix.get(m.pA2);P[4*i+2]=ix.get(m.pB1);P[4*i+3]=ix.get(m.pB2);});
+  const part=new Int16Array(N*N),opp=new Int16Array(N*N),K=(a,b)=>a<b?a*N+b:b*N+a;
+  const bump=(arr,k,w,s)=>{ if(s>0){const d=w*arr[k];arr[k]++;return d;} arr[k]--;return -w*arr[k]; };
+  function pairDelta(i,s){
+    const a=P[4*i],b=P[4*i+1],c=P[4*i+2],d=P[4*i+3];
+    return bump(part,K(a,b),WP,s)+bump(part,K(c,d),WP,s)+bump(opp,K(a,c),WO,s)+bump(opp,K(a,d),WO,s)+bump(opp,K(b,c),WO,s)+bump(opp,K(b,d),WO,s);
+  }
+  const mixed=(a,b)=>(g[a]==='M'&&g[b]==='F')||(g[a]==='F'&&g[b]==='M');
+  function stat(i){
+    const a=P[4*i],b=P[4*i+1],c=P[4*i+2],d=P[4*i+3];let s=0;
+    if(gen){ if(!mixed(a,b)) s+=WM; if(!mixed(c,d)) s+=WM; }
+    if(lev){
+      s+=Math.abs(lv[a]-lv[b])*90+Math.abs(lv[c]-lv[d])*90+Math.abs(lv[a]+lv[b]-lv[c]-lv[d])*150;
+      if(Math.min(lv[a],lv[b])<=1&&Math.max(lv[c],lv[d])>=5) s+=500;
+      if(Math.min(lv[c],lv[d])<=1&&Math.max(lv[a],lv[b])>=5) s+=500;
+    }
+    return s;
+  }
+  function restOf(x){
+    const sl=[];for(let i=0;i<M.length;i++){const o=4*i;if(P[o]===x||P[o+1]===x||P[o+2]===x||P[o+3]===x)sl.push(slotOf[i]);}
+    sl.sort((u,v)=>u-v);let c=0;for(let k=1;k<sl.length;k++) if(sl[k]-sl[k-1]===1) c++;return c;
+  }
+  let cur=0;for(let i=0;i<M.length;i++){cur+=pairDelta(i,1)+stat(i);}
+  let best=cur,bestP=P.slice();
+  const t0=Date.now(),T0=2500,T1=12;let T=T0,it=0;
+  while(true){
+    if((it&1023)===0){
+      const f=(Date.now()-t0)/budgetMs; if(f>=1||best<=0) break;
+      T=T0*Math.pow(T1/T0,f);
+    }
+    it++;
+    const i=(Math.random()*M.length)|0,G=groups[gOf[i]],j=G[(Math.random()*G.length)|0];
+    const p=4*i+((Math.random()*4)|0),q=4*j+((Math.random()*4)|0);
+    if(p===q||P[p]===P[q]) continue;
+    if(i===j&&((p&3)>>1)===((q&3)>>1)) continue; // échange dans la même équipe : sans effet
+    const cross=multi&&slotOf[i]!==slotOf[j],x=P[p],y=P[q],two=j!==i;
+    const before=stat(i)+(two?stat(j):0),rb=cross?restOf(x)+restOf(y):0;
+    let d=pairDelta(i,-1)+(two?pairDelta(j,-1):0);
+    P[p]=y;P[q]=x;
+    d+=pairDelta(i,1)+(two?pairDelta(j,1):0);
+    const delta=d+stat(i)+(two?stat(j):0)-before+(cross?WR*(restOf(x)+restOf(y)-rb):0); // repos : jouer deux créneaux de suite coûte autant qu'un partenaire répété
+    if(delta<=0||Math.random()<Math.exp(-delta/T)){
+      cur+=delta; if(cur<best){best=cur;bestP.set(P);}
+    } else {
+      pairDelta(i,-1);if(two)pairDelta(j,-1);
+      P[p]=x;P[q]=y;
+      pairDelta(i,1);if(two)pairDelta(j,1);
+    }
+  }
+  M.forEach((m,i)=>{m.pA1=ids[bestP[4*i]];m.pA2=ids[bestP[4*i+1]];m.pB1=ids[bestP[4*i+2]];m.pB2=ids[bestP[4*i+3]];delete m._relaxed;});
+}
+
 function buildSchedule(maxAttempts=20){
   const cfg=getCfg();if(cfg.n<4){alert('Il faut au moins 4 joueurs.');return false;}
   ST.cfg=cfg;
-  _schedDeadline=Date.now()+8000; // budget plus large pour comparer davantage de rotations complètes
+  _schedDeadline=Date.now()+2500; // squelette (qui joue quand) ; le raffinage global ci-dessous fait le gros du travail
   const N=cfg.n,T=cfg.t,R=cfg.r;
   // Vagues : forcées ou automatiques
   const forcedWaves = cfg.waves && cfg.waves > 0;
@@ -2326,10 +2403,12 @@ function buildSchedule(maxAttempts=20){
       + totalRelax;
     if(score<bestScore){
       bestScore=score;bestSched=sched;
-      if(totalRelax===0 && restQuality.collisions===0 && restQuality.restViolations===0 && restQuality.partnerRepeatExcess===0 && restQuality.opponentRepeatExcess===0) break;
+      if(restQuality.collisions===0 && restQuality.restViolations===0) break; // le raffinage SA s'occupe ensuite des répétitions
     }
   }
 
+  // ── Raffinage global (v17) : partenaires uniques, adversaires variés, mixité, niveaux, repos
+  try{ optimizeScheduleSA(bestSched,cfg,3000); }catch(err){ console.error('Optimisation SA ignorée :',err); }
   // ── Calcul des horaires
   let currentTime=cfg.start;
   bestSched.forEach((rd,ri)=>{
