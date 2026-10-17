@@ -1970,12 +1970,62 @@ function isMatchValid(pA1,pA2,pB1,pB2,pairCount,oppCount,lastPartnerRound,curren
 // Budget de temps de la génération du planning : au-delà, les contraintes strictes (partenaires/adversaires
 // jamais répétés…) sont assouplies d'un coup au lieu d'être cherchées indéfiniment, ce qui figeait la page.
 var _schedDeadline=0;
+
+// ─────────────────────────────────────────────────────────────
+// RECHERCHE LOCALE : répartit un groupe en matchs en minimisant les répétitions
+// (partenaires = quasi interdit, adversaires = 1 seule rencontre quand c'est possible).
+// Complète la méthode gloutonne : elle trouve des combinaisons sans répétition là où
+// le glouton se bloque, et sinon la répartition qui en génère le moins.
+// ─────────────────────────────────────────────────────────────
+function _lsMatchCost(a1,a2,b1,b2,pairCount,oppCount,lastPartnerRound,currentRound,bal,enforceGender){
+  let c=matchScore(a1,a2,b1,b2,bal), rep=0;
+  if(enforceGender&&!isMixForced(a1,a2,b1,b2)) rep+=1000000;
+  for(const k of [pk(a1,a2),pk(b1,b2)]){
+    const n=pairCount[k]||0; if(n>0) rep+=n*12000;
+    const last=lastPartnerRound[k]; if(last!==undefined&&currentRound-last<=1) rep+=2500;
+  }
+  for(const k of [pk(a1,b1),pk(a1,b2),pk(a2,b1),pk(a2,b2)]){
+    const n=oppCount[k]||0; if(n>0) rep+=n*3000;
+  }
+  return {c:c+rep, rep};
+}
+function lsPartitionGroup(group,pairCount,oppCount,lastPartnerRound,currentRound,cfg,enforceGender){
+  const n=group.length, m=n/4; if(m<1||n%4) return null;
+  const bal=cfg.bal, restarts=n<=8?4:8, iters=n<=8?400:1500;
+  const mc=(arr,i)=>_lsMatchCost(arr[4*i],arr[4*i+1],arr[4*i+2],arr[4*i+3],pairCount,oppCount,lastPartnerRound,currentRound,bal,enforceGender);
+  let best=null;
+  for(let r=0;r<restarts;r++){
+    if(r>0&&_schedDeadline&&Date.now()>_schedDeadline) break;
+    const arr=shuffle(group);
+    const costs=[],reps=[]; let tot=0,rtot=0;
+    for(let i=0;i<m;i++){const x=mc(arr,i);costs.push(x.c);reps.push(x.rep);tot+=x.c;rtot+=x.rep;}
+    for(let it=0;it<iters;it++){
+      if(rtot===0&&(bal==='random'||it>iters/3)) break;
+      const p=Math.floor(Math.random()*n); let q=Math.floor(Math.random()*n); if(p===q) continue;
+      const mi=p>>2, mj=q>>2;
+      [arr[p],arr[q]]=[arr[q],arr[p]];
+      const xi=mc(arr,mi); let xj=null; if(mj!==mi) xj=mc(arr,mj);
+      const newTot=tot-costs[mi]+xi.c+(xj?(xj.c-costs[mj]):0);
+      if(newTot<=tot){
+        tot=newTot; rtot=rtot-reps[mi]+xi.rep+(xj?(xj.rep-reps[mj]):0);
+        costs[mi]=xi.c; reps[mi]=xi.rep; if(xj){costs[mj]=xj.c; reps[mj]=xj.rep;}
+      } else { [arr[p],arr[q]]=[arr[q],arr[p]]; }
+    }
+    if(!best||tot<best.tot||(tot===best.tot&&rtot<best.rtot)) best={arr:[...arr],tot,rtot};
+    if(best.rtot===0&&bal==='random') break;
+  }
+  if(!best) return null;
+  const matches=[];
+  for(let i=0;i<m;i++) matches.push({pA1:best.arr[4*i],pA2:best.arr[4*i+1],pB1:best.arr[4*i+2],pB2:best.arr[4*i+3]});
+  return {matches,tot:best.tot,rep:best.rtot};
+}
 function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRound,cfg){
   if(group.length<4)return[];
   const n=group.length,bal=cfg.bal;
   const strictGender=(bal==='gender'||bal==='both');
   const strictLevel=(bal==='level'||bal==='both');
 
+  let lsFallback=null;
   for(let relaxMode=0;relaxMode<=4;relaxMode++){
     if(_schedDeadline&&relaxMode<4&&Date.now()>_schedDeadline) relaxMode=4; // budget dépassé : on passe au mode le plus souple
     const enforceGender=strictGender&&relaxMode<3;
@@ -2065,6 +2115,18 @@ function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRoun
       if(ok&&matches.length*4===n&&sc<bestScore){bestScore=sc;bestMatches=matches;}
     }
 
+    // Recherche locale : si le glouton est bloqué (ou ne fait que des répétitions), on cherche
+    // une répartition sans répétition, sinon celle qui en produit le moins.
+    if(relaxMode===0 && !(bestMatches&&bestMatches.length*4===n)){
+      const ls=lsPartitionGroup(group,pairCount,oppCount,lastPartnerRound,currentRound,cfg,enforceGender);
+      if(ls){ if(ls.rep===0){ bestMatches=ls.matches; } else { lsFallback=ls; } }
+    }
+    if(relaxMode>=1 && lsFallback && bestMatches && bestMatches.length*4===n){
+      // On garde la meilleure des deux solutions (glouton assoupli vs recherche locale)
+      const gcost=bestMatches.reduce((a,m)=>a+_lsMatchCost(m.pA1,m.pA2,m.pB1,m.pB2,pairCount,oppCount,lastPartnerRound,currentRound,bal,enforceGender).c,0);
+      if(lsFallback.tot<gcost){ bestMatches=lsFallback.matches; }
+    }
+    if(relaxMode>=1 && lsFallback && !(bestMatches&&bestMatches.length*4===n)){ bestMatches=lsFallback.matches; }
     if(bestMatches&&bestMatches.length*4===n){
       if(relaxMode>0)bestMatches.forEach(m=>{m._relaxed=relaxMode;});
       bestMatches.forEach(m=>{
@@ -2259,8 +2321,8 @@ function buildSchedule(maxAttempts=20){
       + restQuality.maxStreak*1e5
       + restQuality.partnerRepeatExcess*1e4
       + restQuality.maxPartnerRepeat*1e3
-      + restQuality.opponentRepeatExcess*100
-      + restQuality.maxOpponentRepeat*10
+      + restQuality.opponentRepeatExcess*300
+      + restQuality.maxOpponentRepeat*30
       + totalRelax;
     if(score<bestScore){
       bestScore=score;bestSched=sched;
