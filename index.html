@@ -220,6 +220,7 @@ onAuthStateChanged(auth, async (user)=>{
       subscribeToResults();
       subscribeToMessages();
       toggleClubExtraNav(hasResp);
+      if(USER_ROLES.includes('admin')) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
       return;
     }
     // Responsable club (seul rôle) : écran dédié d'inscription, pas d'accès à l'appli tournoi
@@ -297,6 +298,7 @@ window.loginGoogle = async function(){
 };
 
 window.logout = async function(){
+  closeAdminPanel();
   clearInterval(ST.timerIv); unsubAll();
   USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   toggleClubExtraNav(false);
@@ -321,6 +323,7 @@ window.enterLiveModeAndGo = async function(target){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
+  closeAdminPanel();
   subscribeToTournamentPublic();
   subscribeToResultsPublic();
   subscribeToMessages();
@@ -512,14 +515,21 @@ window.loadPendingRegistrations = function(){
   if(!isAdmin()) return;
   if(unsubPendingRegs) { renderPendingRegistrations(); return; } // déjà abonné
   const listEl = document.getElementById('regPendingList');
-  if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:13px">Chargement…</div>';
+  if(listEl && !REG_PENDING.length) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:13px">Chargement…</div>';
   unsubPendingRegs = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
     REG_PENDING = [];
     snap.forEach(d=>{ const r=d.data(); if(r.status==='pending') REG_PENDING.push({ id:d.id, ...r }); });
     REG_PENDING.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
     renderPendingRegistrations();
     if(ST.page===2) renderPlayers();
-  }, (e)=>{ console.warn('loadPendingRegistrations', e); if(listEl) listEl.innerHTML='<div style="color:var(--red);font-size:13px">Erreur : '+e.message+'</div>'; });
+  }, (e)=>{
+    console.warn('loadPendingRegistrations', e);
+    // L'écoute est terminée : on libère le verrou pour pouvoir se réabonner (et on réessaie seul)
+    unsubPendingRegs = null;
+    const le = document.getElementById('regPendingList');
+    if(le) le.innerHTML='<div style="color:var(--red);font-size:13px">Erreur : '+e.message+' — nouvelle tentative…</div>';
+    setTimeout(()=>{ if(isAdmin() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
+  });
 };
 function renderPendingRegistrations(){
   const listEl = document.getElementById('regPendingList');
@@ -614,6 +624,7 @@ window.toggleClubExtraNav = function(show){
   if(b2) b2.style.display = show ? '' : 'none';
 };
 window.showResponsableScreen = async function(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='none';
   const rs=document.getElementById('responsableScreen');
@@ -630,6 +641,7 @@ window.showResponsableScreen = async function(){
 };
 window.openResponsableFromApp = function(){ showResponsableScreen(); };
 window.returnToAppFromResponsable = function(){
+  closeAdminPanel();
   const rs=document.getElementById('responsableScreen');
   if(rs) rs.style.display='none';
   document.getElementById('appScreen').style.display='block';
@@ -932,6 +944,7 @@ function showAuthMsg(msg,color){
 // UI LOGIN / APP
 // ══════════════════════════════════════════════════════════
 function showLogin(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('appScreen').style.display='none';
   const rs=document.getElementById('responsableScreen');
@@ -939,6 +952,7 @@ function showLogin(){
   refreshPublicRegUI();
 }
 function showApp(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
@@ -948,6 +962,7 @@ function roleBadge(role){
   return map[role]||role;
 }
 function applyRoleUI(){
+  if(!isAdmin()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
   kickTimerWatchers(); // (re)branche le chrono synchronisé une fois connecté
   const name = CURRENT_USER
     ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
@@ -990,6 +1005,23 @@ function updateStepVisibility(){
 }
 
 // ── Panneau admin ─────────────────────────────────────────
+// Ferme le panneau admin (oubli de fermeture, changement de page, déconnexion, changement de compte…).
+// Coupe l'écoute temps réel de la liste des utilisateurs et efface le mot de passe saisi.
+// (Les inscriptions en attente restent écoutées pendant toute la session admin.)
+function closeAdminPanel(){
+  const el = document.getElementById('adminPanel');
+  if(el) el.style.display = 'none';
+  if(unsubUserList){ unsubUserList(); unsubUserList=null; }
+  const pw = document.getElementById('newU_pwd'); if(pw) pw.value = '';
+}
+window.closeAdminPanel = closeAdminPanel;
+// Panneau resté ouvert pendant que l'appli était en arrière-plan > 5 min : on le referme.
+let _adminHiddenAt = 0;
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden'){ _adminHiddenAt = Date.now(); return; }
+  if(_adminHiddenAt && Date.now()-_adminHiddenAt > 5*60*1000) closeAdminPanel();
+  _adminHiddenAt = 0;
+});
 window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
   const opening = el.style.display==='none';
@@ -1167,6 +1199,7 @@ function subscribeToTournament(){
     if(ST.page==='TV') renderTVContent();
     if(isAdmin() && ST.page===1) syncCfgForm();
     if(isAdmin() && ST.page===2) renderPlayers();
+    if(unsubPendingRegs) renderPendingRegistrations(); // quota / places restantes à jour
     // Scorer : si le tournoi est actif et sur une page setup, rediriger vers p4
     if(!isAdmin() && ST.schedule.length>0 && ST.page<4) goTo(4);
   });
@@ -1301,6 +1334,7 @@ window.spectatorGoLive = async function(n){
 };
 
 window.goTo = function(n){
+  closeAdminPanel(); // changement de page = le panneau admin se referme
   // Spectateur : bloquer toute navigation si live fermé
   if(isLiveBlocked() && n !== 'R'){
     pendingSpecTarget = n;
@@ -1399,6 +1433,7 @@ function updateSteps(n){
   for(let i=1;i<=4;i++) document.getElementById('sl'+i).classList.toggle('done',i<n);
 }
 window.toggleRules = function(){
+  closeAdminPanel();
   ST.rulesOpen=!ST.rulesOpen;
   // Si on ferme le règlement et que le live est fermé pour un spectateur → retour écran connexion
   if(!ST.rulesOpen && isLiveBlocked()){
