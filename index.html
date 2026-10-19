@@ -75,6 +75,9 @@ let tvLastRenderedKey = null; // clé du dernier écran réellement affiché, po
 let unsubResults    = null;
 let unsubPendingRegs = null;   // liste des inscriptions en attente (admin) — temps réel
 let unsubRespRegs    = null;   // inscriptions du responsable de club connecté — temps réel
+let unsubRespSettings = null;  // réglages d'inscription (dates, réserves) côté responsable — temps réel
+let RESP_TICK = null;          // rafraîchissement périodique de l'espace responsable
+let PUB_TICK  = null;          // rafraîchissement périodique du bouton d'inscription publique
 let unsubOpenRegCount= null;   // compteur d'inscriptions publiques (bouton d'accueil) — temps réel
 let unsubUserList    = null;   // liste des utilisateurs (admin) — temps réel
 
@@ -266,6 +269,8 @@ function unsubAll(){
   if(unsubMessages)  { unsubMessages();   unsubMessages=null;   }
   if(unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
   if(unsubRespRegs)   { unsubRespRegs();    unsubRespRegs=null;    }
+  if(unsubRespSettings){ unsubRespSettings(); unsubRespSettings=null; }
+  if(RESP_TICK)       { clearInterval(RESP_TICK); RESP_TICK=null;     }
   if(unsubUserList)   { unsubUserList();    unsubUserList=null;    }
   stopLiveWatch();
   startLiveWatch();
@@ -449,7 +454,69 @@ window.adminCreateUser = async function(){
 // INSCRIPTIONS EN LIGNE — réglages, validation, espace responsable,
 // inscription publique par bouton
 // ══════════════════════════════════════════════════════════
-let REG_SETTINGS = { responsableEnabled:false, openEnabled:false, openMaxSlots:0, clubs:[] };
+let REG_SETTINGS = { responsableEnabled:false, openEnabled:false, openMaxSlots:0, clubs:[],
+  openAt:'', closeAt:'', reserveOn:false, reserveMax:0, reserveOpenMax:0 };
+function parseRegSettings(d){
+  return {
+    responsableEnabled: !!d.responsableEnabled,
+    openEnabled: !!d.openEnabled,
+    openMaxSlots: +d.openMaxSlots || 0,
+    clubs: Array.isArray(d.clubs) ? d.clubs : [],
+    openAt: d.openAt || '',
+    closeAt: d.closeAt || '',
+    reserveOn: !!d.reserveOn,
+    reserveMax: +d.reserveMax || 0,          // joueurs de réserve par club (responsables)
+    reserveOpenMax: +d.reserveOpenMax || 0   // places de réserve au total (inscription publique)
+  };
+}
+// Phase d'inscription : 'before' | 'open' | 'reserve' (fermé, réserves possibles) | 'closed'
+function regPhase(){
+  const r = REG_SETTINGS || {};
+  const now = Date.now();
+  const o = r.openAt  ? new Date(r.openAt).getTime()  : 0;
+  const c = r.closeAt ? new Date(r.closeAt).getTime() : 0;
+  if(o && now < o) return 'before';
+  if(c && now > c) return r.reserveOn ? 'reserve' : 'closed';
+  return 'open';
+}
+function fmtRegDT(v){
+  try { return new Date(v).toLocaleString('fr-FR',{ weekday:'long', day:'2-digit', month:'long', hour:'2-digit', minute:'2-digit' }); }
+  catch(e){ return v; }
+}
+function readRegWindowFields(){
+  const openAt  = document.getElementById('regS_open').value  || '';
+  const closeAt = document.getElementById('regS_close').value || '';
+  const reserveOn = document.getElementById('regS_reserveOn').checked;
+  const reserveMax     = Math.max(0, parseInt(document.getElementById('regS_reserveMax').value,10) || 0);
+  const reserveOpenMax = Math.max(0, parseInt(document.getElementById('regS_reserveOpenMax').value,10) || 0);
+  if(openAt && closeAt && new Date(closeAt) <= new Date(openAt)) throw new Error('La fin des inscriptions doit être après le début.');
+  if(reserveOn && !closeAt) throw new Error('Les réserves s\'ouvrent après la date de fin : renseignez-la.');
+  return { openAt, closeAt, reserveOn, reserveMax, reserveOpenMax,
+           openAtMs: openAt ? new Date(openAt).getTime() : 0,
+           closeAtMs: closeAt ? new Date(closeAt).getTime() : 0 };
+}
+// Anti-doublon : on compare avec les inscriptions RÉELLEMENT présentes (lecture publique),
+// puis on pose un verrou. Un ancien verrou orphelin est recyclé (ou contourné par un
+// verrou « suffixé » si sa suppression est refusée) au lieu de bloquer le joueur à vie.
+async function acquireNameLock(name){
+  const slug = nameSlug(name);
+  const dupExists = async ()=>{
+    const snap = await getDocs(collection(db,'americano_registrations'));
+    let dup = false;
+    snap.forEach(d=>{ if(nameSlug(d.data().name) === slug) dup = true; });
+    return dup;
+  };
+  if(await dupExists()) return { dup:true };
+  const mk = (id)=> setDoc(doc(db,'americano_reg_names',id), { name, createdAtMs: Date.now() });
+  try { await mk(slug); return { slug }; } catch(e){}
+  // Le verrou existe déjà. Laisse une éventuelle inscription simultanée se terminer, puis revérifie.
+  await new Promise(r=>setTimeout(r,1500));
+  if(await dupExists()) return { dup:true };
+  try { await deleteDoc(doc(db,'americano_reg_names',slug)); await mk(slug); return { slug }; } catch(e){}
+  const alt = slug + '_r' + Date.now().toString(36);
+  try { await mk(alt); return { slug: alt }; } catch(e){}
+  return { error:true };
+}
 let REG_PENDING  = [];
 let RESP_PROFILE = null;
 let RESP_REGS    = [];
@@ -470,12 +537,7 @@ async function loadRegistrationSettings(){
     const snap = await getDoc(doc(db,'settings','registration'));
     if(snap.exists()){
       const d = snap.data();
-      REG_SETTINGS = {
-        responsableEnabled: !!d.responsableEnabled,
-        openEnabled: !!d.openEnabled,
-        openMaxSlots: +d.openMaxSlots || 0,
-        clubs: Array.isArray(d.clubs) ? d.clubs : []
-      };
+      REG_SETTINGS = parseRegSettings(d);
     }
   } catch(e){ console.warn('loadRegistrationSettings', e); }
   return REG_SETTINGS;
@@ -488,6 +550,11 @@ window.openAdminRegSettings = async function(){
   document.getElementById('regS_openEnabled').checked = REG_SETTINGS.openEnabled;
   document.getElementById('regS_openMax').value = REG_SETTINGS.openMaxSlots || 0;
   document.getElementById('regS_clubs').value = (REG_SETTINGS.clubs||[]).join('\n');
+  document.getElementById('regS_open').value = REG_SETTINGS.openAt || '';
+  document.getElementById('regS_close').value = REG_SETTINGS.closeAt || '';
+  document.getElementById('regS_reserveOn').checked = !!REG_SETTINGS.reserveOn;
+  document.getElementById('regS_reserveMax').value = REG_SETTINGS.reserveMax || 0;
+  document.getElementById('regS_reserveOpenMax').value = REG_SETTINGS.reserveOpenMax || 0;
   window.loadPendingRegistrations();
 };
 
@@ -499,10 +566,11 @@ window.saveRegistrationSettings = async function(){
   const openMaxSlots = +document.getElementById('regS_openMax').value || 0;
   const clubs = document.getElementById('regS_clubs').value.split('\n').map(s=>s.trim()).filter(Boolean);
   try {
+    const win = readRegWindowFields();
     await setDoc(doc(db,'settings','registration'),{
-      responsableEnabled, openEnabled, openMaxSlots, clubs, updatedAt: serverTimestamp()
+      responsableEnabled, openEnabled, openMaxSlots, clubs, ...win, updatedAt: serverTimestamp()
     }, { merge:true });
-    REG_SETTINGS = { responsableEnabled, openEnabled, openMaxSlots, clubs };
+    REG_SETTINGS = parseRegSettings({ responsableEnabled, openEnabled, openMaxSlots, clubs, ...win });
     if(msg){ msg.textContent='✅ Réglages enregistrés.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },3000); }
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
 };
@@ -519,7 +587,7 @@ window.loadPendingRegistrations = function(){
   unsubPendingRegs = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
     REG_PENDING = [];
     snap.forEach(d=>{ const r=d.data(); if(r.status==='pending') REG_PENDING.push({ id:d.id, ...r }); });
-    REG_PENDING.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
+    REG_PENDING.sort((a,b)=> (a.reserve?1:0)-(b.reserve?1:0) || (a.createdAtMs||0)-(b.createdAtMs||0));
     renderPendingRegistrations();
     if(ST.page===2) renderPlayers();
   }, (e)=>{
@@ -557,7 +625,7 @@ function renderPendingRegistrations(){
     const rank = `<span style="font-size:11px;font-weight:700;color:${willFit?'#5ad080':'#e6a23c'};background:rgba(255,255,255,.06);border-radius:8px;padding:1px 7px;margin-right:6px">#${i+1}${willFit?'':' · attente'}</span>`;
     return `<div style="border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700;color:var(--ink)">${rank}${(r.name||'—')} <span style="font-size:12px;font-weight:400;color:rgba(255,255,255,.5)">${g} · Niveau ${lv}</span></div>
+        <div style="font-weight:700;color:var(--ink)">${rank}${r.reserve?'<span style="font-size:11px;font-weight:700;color:#4a86d8;border:1px solid #4a86d8;border-radius:8px;padding:1px 7px;margin-right:6px">🔄 RÉSERVE</span>':''}${(r.name||'—')} <span style="font-size:12px;font-weight:400;color:rgba(255,255,255,.5)">${g} · Niveau ${lv}</span></div>
         <div style="color:rgba(255,255,255,.5);font-size:12px">${r.club||'—'} · ${origin}</div>
       </div>
       <div style="display:flex;gap:8px">
@@ -638,7 +706,18 @@ window.showResponsableScreen = async function(){
   if(backBtn)   backBtn.style.display   = hasStaff ? '' : 'none';
   if(logoutBtn) logoutBtn.style.display = hasStaff ? 'none' : '';
   subscribeResponsableRegs();
+  subscribeRespSettings();
 };
+// Réglages d'inscription (dates, réserves) : settings/registration est lisible par tous
+function subscribeRespSettings(){
+  if(!unsubRespSettings){
+    unsubRespSettings = onSnapshot(doc(db,'settings','registration'), (snap)=>{
+      if(snap.exists()) REG_SETTINGS = parseRegSettings(snap.data());
+      renderResponsableScreen();
+    }, (e)=>{ console.warn('subscribeRespSettings', e); });
+  }
+  if(!RESP_TICK) RESP_TICK = setInterval(()=>{ renderResponsableScreen(); }, 30000);
+}
 window.openResponsableFromApp = function(){ showResponsableScreen(); };
 window.returnToAppFromResponsable = function(){
   closeAdminPanel();
@@ -661,13 +740,37 @@ function subscribeResponsableRegs(){
   }, (e)=>{ console.warn('subscribeResponsableRegs', e); RESP_REGS=[]; renderResponsableScreen(); });
 }
 function renderResponsableScreen(){
+  const phase = regPhase();
+  const reserveMax = Math.max(0, +REG_SETTINGS.reserveMax || 0);
+  const normal  = RESP_REGS.filter(r=>!r.reserve);
+  const reserve = RESP_REGS.filter(r=> r.reserve);
+  const used = normal.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
   const quotaEl = document.getElementById('respQuota');
-  const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
-  if(quotaEl) quotaEl.textContent = `${used} / ${max} inscription${max>1?'s':''}`;
+  if(quotaEl){
+    let txt = `${used} / ${max} inscription${max>1?'s':''}`;
+    if(REG_SETTINGS.reserveOn) txt += ` · ${reserve.length} / ${reserveMax} en réserve`;
+    quotaEl.textContent = txt;
+  }
+  // Bandeau d'information sur la période d'inscription
+  const info = document.getElementById('respRegInfo');
+  if(info){
+    let html = '', bg = 'rgba(80,140,220,.15)';
+    if(phase==='before'){ html = `⏳ Les inscriptions ouvriront le <strong>${fmtRegDT(REG_SETTINGS.openAt)}</strong>.`; bg='rgba(230,162,60,.18)'; }
+    else if(phase==='open'){ if(REG_SETTINGS.closeAt){ html = `🟢 Inscriptions ouvertes jusqu'au <strong>${fmtRegDT(REG_SETTINGS.closeAt)}</strong>.`; bg='rgba(30,140,69,.15)'; } }
+    else if(phase==='reserve'){ html = `🔒 Inscriptions closes depuis le <strong>${fmtRegDT(REG_SETTINGS.closeAt)}</strong>.<br>🔄 Vous pouvez inscrire jusqu'à <strong>${reserveMax}</strong> joueur${reserveMax>1?'s':''} <strong>de réserve</strong> : ils ne seront validés qu'en cas de désistement ou s'il reste des places.`; }
+    else { html = `🔒 Les inscriptions sont closes depuis le <strong>${fmtRegDT(REG_SETTINGS.closeAt)}</strong>.`; bg='rgba(200,60,60,.15)'; }
+    info.style.display = html ? '' : 'none';
+    info.style.background = bg;
+    info.innerHTML = html;
+  }
+  // Formulaire selon la phase
+  let showForm = false, fullTxt = '';
+  if(phase==='open'){ showForm = used < max; if(!showForm) fullTxt = '⚠️ Quota d\'inscriptions atteint pour votre club.'; }
+  else if(phase==='reserve'){ showForm = reserve.length < reserveMax; if(!showForm) fullTxt = '⚠️ Quota de joueurs de réserve atteint pour votre club.'; }
   const formWrap = document.getElementById('respAddForm');
-  if(formWrap) formWrap.style.display = (used < max) ? '' : 'none';
+  if(formWrap) formWrap.style.display = showForm ? 'flex' : 'none';
   const fullMsg = document.getElementById('respQuotaFullMsg');
-  if(fullMsg) fullMsg.style.display = (used >= max) ? '' : 'none';
+  if(fullMsg){ fullMsg.style.display = fullTxt ? '' : 'none'; fullMsg.textContent = fullTxt; }
   const listEl = document.getElementById('respRegsList');
   if(!listEl) return;
   if(RESP_REGS.length===0){
@@ -678,7 +781,9 @@ function renderResponsableScreen(){
   listEl.innerHTML = RESP_REGS.map(r=>{
     const badge = r.status==='imported'
       ? '<span style="color:var(--grn);font-size:12px;font-weight:700">✅ Validée — intégrée au tournoi</span>'
-      : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>';
+      : (r.reserve
+          ? '<span style="color:#4a86d8;font-size:12px;font-weight:700">🔄 Réserve — en attente</span>'
+          : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>');
     return `<div style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
         <div style="font-weight:700">${r.name||'—'} <span style="font-size:12px;font-weight:400;color:var(--muted)">${genderIcon[r.g]||'⚧'} · Niveau ${r.lv||3}</span></div>
@@ -690,35 +795,37 @@ function renderResponsableScreen(){
 }
 window.respAddPlayer = async function(){
   if(!isResponsable()) return;
-  const used = RESP_REGS.length, max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
-  if(used >= max){ alert('Quota d\'inscriptions atteint pour votre club.'); return; }
+  const msg = document.getElementById('respAddMsg');
+  const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
+  const phase = regPhase();
+  if(phase==='before' || phase==='closed'){ say('Les inscriptions ne sont pas ouvertes actuellement.','var(--red)'); renderResponsableScreen(); return; }
+  const reserve = phase==='reserve';
+  const max = RESP_PROFILE ? RESP_PROFILE.maxPlayers : 0;
+  const reserveMax = Math.max(0, +REG_SETTINGS.reserveMax || 0);
+  if(!reserve && RESP_REGS.filter(r=>!r.reserve).length >= max){ alert('Quota d\'inscriptions atteint pour votre club.'); return; }
+  if(reserve && RESP_REGS.filter(r=>r.reserve).length >= reserveMax){ alert('Quota de joueurs de réserve atteint pour votre club.'); return; }
   const name = document.getElementById('resp_p_name').value.trim();
   const lv = +document.getElementById('resp_p_lv').value || 3;
   const g = document.getElementById('resp_p_gd').value || 'X';
-  const msg = document.getElementById('respAddMsg');
-  if(!name){ if(msg){ msg.textContent='Le nom et prénom du joueur sont obligatoires.'; msg.style.color='var(--red)'; } return; }
+  if(!name){ say('Le nom et prénom du joueur sont obligatoires.','var(--red)'); return; }
   const btn = document.querySelector('#respAddForm button');
   if(btn && btn.disabled) return; // clic déjà en cours de traitement, on ignore les répétitions
   if(btn) btn.disabled = true;
   try {
-    // Anti-doublon FIABLE (résiste aux double-clics et aux inscriptions simultanées
-    // depuis 2 appareils) : on réserve d'abord un "verrou" nommé d'après le joueur.
-    // Si le verrou existe déjà, Firestore refuse l'écriture (voir règles de sécurité :
-    // americano_reg_names autorise "create" mais pas "update") → doublon détecté à coup sûr.
-    const slug = nameSlug(name);
-    try {
-      await setDoc(doc(db,'americano_reg_names',slug), { name, createdAtMs: Date.now() });
-    } catch(lockErr){
-      if(msg){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé).'; msg.style.color='var(--red)'; }
-      return;
-    }
-    await addDoc(collection(db,'americano_registrations'),{
+    const lock = await acquireNameLock(name);
+    if(lock.dup){ say('❌ Ce joueur est déjà inscrit (en attente ou déjà validé).','var(--red)'); return; }
+    if(lock.error){ say('❌ Impossible de réserver ce nom. Réessayez.','var(--red)'); return; }
+    const payload = {
       source:'responsable', responsableUid: CURRENT_USER.uid, responsableName: RESP_PROFILE.clubName,
-      club: RESP_PROFILE.clubName, name, lv, g, nameSlug: slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
-    });
+      club: RESP_PROFILE.clubName, name, lv, g, nameSlug: lock.slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
+    };
+    if(reserve) payload.reserve = true;
+    try { await addDoc(collection(db,'americano_registrations'), payload); }
+    catch(e){ try { await deleteDoc(doc(db,'americano_reg_names',lock.slug)); } catch(_){} throw e; }
     document.getElementById('resp_p_name').value='';
-    if(msg){ msg.textContent='✅ Joueur inscrit, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
-  } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+    say(reserve ? '✅ Joueur de réserve inscrit, en attente de validation par l\'organisateur.' : '✅ Joueur inscrit, en attente de validation par l\'organisateur.','var(--grn)');
+    setTimeout(()=>{ if(msg) msg.textContent=''; },4000);
+  } catch(e){ say('❌ '+e.message,'var(--red)'); }
   finally { if(btn) btn.disabled = false; }
 };
 window.respDeleteReg = async function(id){
@@ -733,6 +840,8 @@ window.respDeleteReg = async function(id){
 window.respLogout = async function(){
   RESP_PROFILE = null; RESP_REGS = [];
   if(unsubRespRegs){ unsubRespRegs(); unsubRespRegs=null; }
+  if(unsubRespSettings){ unsubRespSettings(); unsubRespSettings=null; }
+  if(RESP_TICK){ clearInterval(RESP_TICK); RESP_TICK=null; }
   USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   if(auth.currentUser) await signOut(auth);
   else showLogin();
@@ -751,35 +860,41 @@ function refreshPublicRegUI(){
   onSnapshot(settingsRef, (snap)=>{
     if(snap.exists()){
       const d = snap.data();
-      REG_SETTINGS = {
-        responsableEnabled: !!d.responsableEnabled,
-        openEnabled: !!d.openEnabled,
-        openMaxSlots: +d.openMaxSlots || 0,
-        clubs: Array.isArray(d.clubs) ? d.clubs : []
-      };
+      REG_SETTINGS = parseRegSettings(d);
     }
     updatePublicRegBtn();
   }, (e)=>{ console.warn('refreshPublicRegUI settings', e); });
+  if(!PUB_TICK) PUB_TICK = setInterval(updatePublicRegBtn, 30000);
   unsubOpenRegCount = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
-    let used = 0;
-    snap.forEach(d=>{ if(d.data().source==='open') used++; });
-    OPEN_REG_USED = used;
+    let used = 0, usedRes = 0;
+    snap.forEach(d=>{ const x=d.data(); if(x.source==='open'){ if(x.reserve) usedRes++; else used++; } });
+    OPEN_REG_USED = used; OPEN_RES_USED = usedRes;
     updatePublicRegBtn();
   }, (e)=>{ console.warn('refreshPublicRegUI count', e); });
 }
-let OPEN_REG_USED = 0;
+let OPEN_REG_USED = 0, OPEN_RES_USED = 0;
 function updatePublicRegBtn(){
   const btn = document.getElementById('openRegBtn');
   const trackBtn = document.getElementById('openRegTrackBtn');
   if(trackBtn) trackBtn.style.display = getTrackedRegs().length ? '' : 'none';
   if(!btn) return;
   if(!REG_SETTINGS.openEnabled){ btn.style.display='none'; return; }
-  if(OPEN_REG_USED >= REG_SETTINGS.openMaxSlots){
-    btn.style.display='';
+  btn.style.display='';
+  const phase = regPhase();
+  if(phase==='before'){
+    btn.disabled = true;
+    btn.textContent = '📝 Inscriptions à partir du ' + new Date(REG_SETTINGS.openAt).toLocaleString('fr-FR',{ day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+  } else if(phase==='closed'){
+    btn.disabled = true;
+    btn.textContent = '📝 Inscriptions closes';
+  } else if(phase==='reserve'){
+    const full = OPEN_RES_USED >= (REG_SETTINGS.reserveOpenMax||0);
+    btn.disabled = full;
+    btn.textContent = full ? '📝 Liste de réserve complète' : '📝 S\'inscrire sur la liste de réserve';
+  } else if(OPEN_REG_USED >= REG_SETTINGS.openMaxSlots){
     btn.disabled = true;
     btn.textContent = '📝 Inscriptions complètes';
   } else {
-    btn.style.display='';
     btn.disabled = false;
     btn.textContent = '📝 S\'inscrire au tournoi';
   }
@@ -806,25 +921,22 @@ window.submitOpenRegistration = async function(){
   if(submitBtn && submitBtn.disabled) return; // évite les doubles clics / doubles envois
   if(submitBtn) submitBtn.disabled = true;
   try {
+    const phase = regPhase();
+    if(phase==='before' || phase==='closed'){ msg.textContent='Les inscriptions ne sont pas ouvertes actuellement.'; msg.style.color='var(--red)'; return; }
+    const reserve = phase==='reserve';
     const snap = await getDocs(collection(db,'americano_registrations'));
-    let used = 0;
-    snap.forEach(d=>{ if(d.data().source==='open') used++; });
-    if(used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
-    // Anti-doublon FIABLE (résiste aux double-clics et aux inscriptions simultanées
-    // depuis 2 appareils différents) : on réserve d'abord un "verrou" nommé d'après
-    // le joueur. Si le verrou existe déjà, Firestore refuse l'écriture (les règles
-    // de sécurité autorisent "create" sur americano_reg_names mais pas "update")
-    // → le doublon est détecté à coup sûr, même en cas de course entre 2 requêtes.
-    const slug = nameSlug(name);
-    try {
-      await setDoc(doc(db,'americano_reg_names',slug), { name, createdAtMs: Date.now() });
-    } catch(lockErr){
-      msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé). Si c\'est une erreur, contactez l\'organisateur.'; msg.style.color='var(--red)';
-      return;
-    }
-    const ref = await addDoc(collection(db,'americano_registrations'),{
-      source:'open', name, club, lv, g, nameSlug: slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp()
-    });
+    let used = 0, usedRes = 0;
+    snap.forEach(d=>{ const x=d.data(); if(x.source==='open'){ if(x.reserve) usedRes++; else used++; } });
+    if(!reserve && used >= REG_SETTINGS.openMaxSlots){ msg.textContent='Désolé, les inscriptions sont complètes.'; msg.style.color='var(--red)'; return; }
+    if(reserve && usedRes >= (REG_SETTINGS.reserveOpenMax||0)){ msg.textContent='Désolé, la liste de réserve est complète.'; msg.style.color='var(--red)'; return; }
+    const lock = await acquireNameLock(name);
+    if(lock.dup){ msg.textContent='❌ Ce joueur est déjà inscrit (en attente ou déjà validé). Si c\'est une erreur, contactez l\'organisateur.'; msg.style.color='var(--red)'; return; }
+    if(lock.error){ msg.textContent='❌ Impossible de réserver ce nom. Réessayez.'; msg.style.color='var(--red)'; return; }
+    const payload = { source:'open', name, club, lv, g, nameSlug: lock.slug, status:'pending', createdAtMs: Date.now(), createdAt: serverTimestamp() };
+    if(reserve) payload.reserve = true;
+    let ref;
+    try { ref = await addDoc(collection(db,'americano_registrations'), payload); }
+    catch(e){ try { await deleteDoc(doc(db,'americano_reg_names',lock.slug)); } catch(_){} throw e; }
     trackRegLocally(ref.id, name);
     msg.textContent='✅ Inscription envoyée ! Utilisez "👀 Suivre mes inscriptions" sur l\'écran d\'accueil pour voir quand elle sera validée.'; msg.style.color='var(--grn)';
     setTimeout(()=>{ closeOpenRegModal(); }, 2400);
@@ -4866,6 +4978,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
       </div>
     </div>
     <div style="background:var(--s2);border:1px solid var(--bdr2);border-radius:14px;padding:18px;margin-bottom:18px">
+      <div id="respRegInfo" style="display:none;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;line-height:1.45;color:var(--ink)"></div>
       <div id="respQuota" style="font-weight:700;color:var(--ink);margin-bottom:14px">0 / 0 inscription</div>
       <div id="respAddForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <input type="text" id="resp_p_name" placeholder="Nom et prénom du joueur" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')respAddPlayer()">
@@ -5149,6 +5262,22 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
             <label style="color:var(--muted)">Liste des clubs proposés (un par ligne, la personne peut aussi taper un autre nom)</label>
             <textarea id="regS_clubs" rows="5" placeholder="Club A&#10;Club B&#10;Club C" style="width:100%;background:#fff;border:1px solid var(--bdr2);color:var(--ink);border-radius:8px;padding:8px;font-family:'Exo 2',sans-serif;resize:vertical"></textarea>
           </div>
+        </div>
+        <div style="margin-top:14px;border:1px solid var(--bdr2);border-radius:10px;padding:12px">
+          <div style="font-weight:700;color:var(--ink);margin-bottom:10px">📅 Période d'inscription en ligne &amp; joueurs de réserve</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+            <div><label style="color:var(--muted)">Début des inscriptions</label><input type="datetime-local" id="regS_open" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
+            <div><label style="color:var(--muted)">Fin des inscriptions</label><input type="datetime-local" id="regS_close" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px;cursor:pointer;margin-top:12px">
+            <input type="checkbox" id="regS_reserveOn" style="width:18px;height:18px">
+            Autoriser des joueurs de réserve (inscriptions possibles uniquement après la date de fin)
+          </label>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:10px">
+            <div><label style="color:var(--muted)">Réserves par club (responsables)</label><input type="number" id="regS_reserveMax" min="0" value="0" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
+            <div><label style="color:var(--muted)">Places de réserve — inscription publique (total)</label><input type="number" id="regS_reserveOpenMax" min="0" value="0" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Sans dates, les inscriptions restent ouvertes en permanence. Les réserves apparaissent en fin de liste d'attente (badge « RÉSERVE ») : vous les validez si une place se libère.</div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:10px">
           <button class="btn btn-g btn-sm" onclick="saveRegistrationSettings()">✓ Enregistrer les réglages</button>
