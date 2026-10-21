@@ -2002,21 +2002,37 @@ window.regenerate = async function(){
   if(!(await confirmDiscardScores())) return;
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
-// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon de noms
+// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon de noms.
+// Chaque suppression est indépendante et comptée : rien n'échoue en silence.
 async function purgeRegistrations(){
-  try {
-    const [regs, locks] = await Promise.all([
-      getDocs(collection(db,'americano_registrations')),
-      getDocs(collection(db,'americano_reg_names'))
-    ]);
-    await Promise.all([...regs.docs, ...locks.docs].map(d=>deleteDoc(d.ref)));
-  } catch(e){ console.warn('purgeRegistrations', e); alert('Les inscriptions de l\'édition précédente n\'ont pas pu toutes être effacées : ' + e.message); }
+  const out = { regs:0, locks:0, errors:[] };
+  for(const [col,key] of [['americano_registrations','regs'],['americano_reg_names','locks']]){
+    try {
+      const snap = await getDocs(collection(db,col));
+      const res = await Promise.allSettled(snap.docs.map(d=>deleteDoc(d.ref)));
+      res.forEach(r=>{ if(r.status==='fulfilled') out[key]++; else out.errors.push(col+' : '+((r.reason&&r.reason.message)||r.reason)); });
+    } catch(e){ out.errors.push(col+' : '+e.message); }
+  }
+  return out;
 }
+function purgeSummary(p){
+  if(p.errors.length) return '⚠️ Nettoyage incomplet : '+p.regs+' inscription(s) et '+p.locks+' verrou(x) effacé(s). Erreur : '+p.errors[0];
+  return '🧹 '+p.regs+' inscription(s) et '+p.locks+' verrou(x) de l\'édition précédente effacé(s).';
+}
+window.purgeAllRegistrations = async function(){
+  if(!isManager()) return;
+  const msg = document.getElementById('purgeMsg');
+  if(!confirm('Effacer TOUTES les inscriptions en ligne (en attente et validées) et les verrous anti-doublon ?\n\nLes joueurs déjà intégrés au tournoi ne sont pas retirés. Les comptes des responsables sont conservés.')) return;
+  if(msg){ msg.textContent='Nettoyage en cours…'; msg.style.color='var(--muted)'; }
+  const p = await purgeRegistrations();
+  if(msg){ msg.textContent = purgeSummary(p); msg.style.color = p.errors.length ? 'var(--red)' : 'var(--grn)'; }
+};
 window.newTournament = async function(){  if(!isManager()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ?\n\nSeront effacés : joueurs, planning, scores ET inscriptions (en attente et validées).\nLes comptes des responsables de club sont conservés.')) return;
   clearInterval(ST.timerIv);
+  const purged = await purgeRegistrations(); // repartir de zéro : inscriptions + verrous de l'édition précédente
+  if(purged.regs || purged.locks || purged.errors.length) alert(purgeSummary(purged));
   await clearAllResults();
-  await purgeRegistrations(); // repartir de zéro : inscriptions + verrous de l'édition précédente
   ST.tStatus='setup';
   ST.players=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
@@ -5473,6 +5489,15 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-g btn-sm" onclick="adminCreateResp()">✓ Créer</button></div>
             <div id="newRespMsg" style="font-size:13px;min-height:18px"></div>
+          </div>
+        </details>
+        <details class="adm-sub">
+          <summary>🧹 Nouvelle édition : effacer les inscriptions de l'ancien tournoi</summary>
+          <div class="adm-body">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">« Nouveau tournoi » le fait déjà automatiquement. Ce bouton permet de le refaire à tout moment : il efface toutes les inscriptions (en attente et validées) et les verrous anti-doublon, pour que les responsables puissent réinscrire les mêmes joueurs. Les comptes responsables sont conservés.</div>
+            <button class="btn btn-r btn-sm" onclick="purgeAllRegistrations()">🧹 Effacer toutes les inscriptions</button>
+            <div id="purgeMsg" style="font-size:13px;min-height:18px;margin-top:8px"></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">Version de l'appli : 21/10 · nettoyage des inscriptions v2</div>
           </div>
         </details>
         <details class="adm-sub" id="admLinkSub">
