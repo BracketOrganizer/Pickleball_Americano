@@ -435,19 +435,13 @@ window.adminCreateUser = async function(){
   if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
   try {
     // Créer l'utilisateur via la REST API Firebase Auth (sans déconnecter l'admin)
-    const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
-      { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ email, password:pwd, returnSecureToken:true }) }
-    );
-    const data = await res.json();
-    if(data.error){ throw new Error(data.error.message); }
-    const uid = data.localId;
+    const acc = await createOrReviveAccount(email, pwd);
+    const uid = acc.uid;
     // Créer le doc Firestore (role = premier rôle pour compat. affichage, roles = liste complète)
     const userDoc = { email, name, role: roles[0], roles, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid };
     await setDoc(doc(db,'users',uid), userDoc);
     await auditLog('admin_create_user',{ uid, email, name, roles });
-    msg.textContent=`✅ Compte créé : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
+    msg.textContent=`✅ Compte ${acc.revived?'réactivé':'créé'} : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
     document.getElementById('newU_name').value='';
     document.getElementById('newU_email').value='';
     document.getElementById('newU_pwd').value='';
@@ -455,7 +449,7 @@ window.adminCreateUser = async function(){
     toggleNewUResponsableFields();
     setTimeout(()=>{ msg.textContent=''; },4000);
   } catch(e){
-    msg.textContent='❌ '+e.message; msg.style.color='var(--red)';
+    msg.textContent='❌ '+authErrText(e); msg.style.color='var(--red)';
   }
 };
 // ══════════════════════════════════════════════════════════
@@ -622,10 +616,38 @@ function groupByClubHTML(list, clubOf, cardFn){
     return `<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:var(--ink);padding:6px 4px;border-bottom:2px solid var(--bdr2);margin-bottom:8px">🏟️ ${g.name} <span style="font-weight:400;color:var(--muted);font-size:12px">— ${g.items.length} en attente${nRes?` (dont ${nRes} réserve)`:''}</span></div>${g.items.map(x=>cardFn(x.r,x.i)).join('')}</div>`;
   }).join('');
 }
+const AUTH_API_KEY = 'AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc';
+async function authRest(endpoint, body){
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${AUTH_API_KEY}`,
+    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  return res.json();
+}
+// Supprimer un compte dans l'appli n'efface que sa FICHE (Firestore) : l'adresse email reste dans
+// Firebase Authentication (le navigateur ne peut pas la supprimer). Si on recrée un compte avec la
+// même adresse, on le « réactive » : 1) même mot de passe → on récupère le compte et on recrée la fiche ;
+// 2) autre mot de passe → on envoie un email de réinitialisation.
+async function createOrReviveAccount(email, pwd){
+  const d = await authRest('accounts:signUp', { email, password:pwd, returnSecureToken:true });
+  if(!d.error) return { uid: d.localId, revived:false };
+  if(d.error.message !== 'EMAIL_EXISTS') throw new Error(d.error.message);
+  const si = await authRest('accounts:signInWithPassword', { email, password:pwd, returnSecureToken:true });
+  if(!si.error){
+    // Ne jamais écraser une fiche existante (compte encore actif)
+    try {
+      const ex = await getDoc(doc(db,'users',si.localId));
+      if(ex.exists()){
+        const r = ex.data().roles || [ex.data().role];
+        throw new Error('Un compte actif existe déjà avec cet email (rôles : ' + r.join(', ') + '). Un admin peut lui ajouter le rôle avec « 🔗 Ajouter le rôle … à un compte existant ».');
+      }
+    } catch(e){ if(/compte actif/.test(String(e.message))) throw e; /* lecture refusée : la fiche n'existe pas (ou n'est pas lisible) */ }
+    return { uid: si.localId, revived:true };
+  }
+  try { await authRest('accounts:sendOobCode', { requestType:'PASSWORD_RESET', email }); } catch(_){}
+  const err = new Error('EMAIL_RESET_SENT'); err.resetSent = true; throw err;
+}
 function authErrText(e){
-  return /EMAIL_EXISTS/.test(String(e && e.message))
-    ? "Cet email a déjà un compte (ex : scorer / admin). Un admin peut lui ajouter le rôle avec « 🔗 Ajouter le rôle … à un compte existant »."
-    : (e && e.message);
+  if(e && e.resetSent) return "Cet email existait déjà dans Firebase (ancienne édition) avec un autre mot de passe. Un email de réinitialisation vient de lui être envoyé : après avoir choisi son mot de passe et s'être connectée une première fois, un admin l'ajoute avec « 🔗 Ajouter le rôle … à un compte existant ». (Ou supprimez l'email dans la console Firebase › Authentication.)";
+  return (e && e.message);
 }
 // Compte à double rôle (staff + club/responsable) : on demande où aller à la connexion
 function showAccessChoice(){
@@ -1302,13 +1324,11 @@ window.adminCreateResp = async function(){
   if(!clubName||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
   try {
-    const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
-      { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, password:pwd, returnSecureToken:true }) });
-    const data = await res.json();
-    if(data.error) throw new Error(data.error.message);
+    const acc = await createOrReviveAccount(email, pwd);
+    const data = { localId: acc.uid };
     await setDoc(doc(db,'users',data.localId), { email, clubName, name:clubName, role:'responsable', roles:['responsable'], maxPlayers, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid });
     await auditLog('admin_create_resp',{ uid:data.localId, email, clubName, maxPlayers });
-    msg.textContent=`✅ Compte responsable créé : ${clubName} (${maxPlayers} inscription${maxPlayers>1?'s':''} max)`; msg.style.color='var(--grn)';
+    msg.textContent=`✅ Compte responsable ${acc.revived?'réactivé':'créé'} : ${clubName} (${maxPlayers} inscription${maxPlayers>1?'s':''} max)`; msg.style.color='var(--grn)';
     ['newR_name','newR_email','newR_pwd'].forEach(id=>document.getElementById(id).value='');
     document.getElementById('newR_max').value='4';
     setTimeout(()=>{ msg.textContent=''; },5000);
@@ -1393,7 +1413,7 @@ window.deleteResp = async function(uid){
       if(!confirm('Ce compte a aussi le(s) rôle(s) : '+others.join(', ')+'.\nSeul le rôle « responsable » sera retiré (le compte est conservé). Continuer ?')) return;
       await updateDoc(doc(db,'users',uid), { roles: others, role: others[0], clubName:'', maxPlayers:0 });
     } else {
-      if(!confirm('Supprimer ce responsable ? Ses joueurs déjà validés et intégrés au tournoi ne seront pas retirés.')) return;
+      if(!confirm('Supprimer ce responsable ? Ses joueurs déjà validés et intégrés au tournoi ne seront pas retirés.\n\nNote : l\'adresse email reste enregistrée dans Firebase Authentication ; si vous recréez un compte avec cette adresse, il sera réactivé automatiquement.')) return;
       await deleteDoc(doc(db,'users',uid));
     }
     await auditLog('admin_delete_resp',{ uid });
@@ -1982,10 +2002,21 @@ window.regenerate = async function(){
   if(!(await confirmDiscardScores())) return;
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
+// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon de noms
+async function purgeRegistrations(){
+  try {
+    const [regs, locks] = await Promise.all([
+      getDocs(collection(db,'americano_registrations')),
+      getDocs(collection(db,'americano_reg_names'))
+    ]);
+    await Promise.all([...regs.docs, ...locks.docs].map(d=>deleteDoc(d.ref)));
+  } catch(e){ console.warn('purgeRegistrations', e); alert('Les inscriptions de l\'édition précédente n\'ont pas pu toutes être effacées : ' + e.message); }
+}
 window.newTournament = async function(){  if(!isManager()){ alert('Admin uniquement.'); return; }
-  if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
+  if(!confirm('Nouveau tournoi ?\n\nSeront effacés : joueurs, planning, scores ET inscriptions (en attente et validées).\nLes comptes des responsables de club sont conservés.')) return;
   clearInterval(ST.timerIv);
   await clearAllResults();
+  await purgeRegistrations(); // repartir de zéro : inscriptions + verrous de l'édition précédente
   ST.tStatus='setup';
   ST.players=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
