@@ -79,8 +79,6 @@ let unsubRespSettings = null;  // réglages d'inscription (dates, réserves) cô
 let RESP_TICK = null;          // rafraîchissement périodique de l'espace responsable
 let PUB_TICK  = null;          // rafraîchissement périodique du bouton d'inscription publique
 let unsubOpenRegCount= null;   // compteur d'inscriptions publiques (bouton d'accueil) — temps réel
-let unsubRespList    = null;   // liste des responsables de club (admin / users) — temps réel
-let unsubRespCounts  = null;   // nombre d'inscriptions par responsable — temps réel
 let unsubUserList    = null;   // liste des utilisateurs (admin) — temps réel
 
 const ST = {
@@ -96,11 +94,8 @@ const ST = {
 };
 
 // ─── Helpers rôle ───────────────────────────────────────
-// ADMIN strict : seul à gérer les comptes staff (créer, rôles, liste des utilisateurs).
-function isAdmin()   { return USER_ROLES.includes('admin'); }
-// GESTIONNAIRE : admin OU rôle « users » = tous les réglages de l'appli SAUF les comptes staff.
-function isManager() { return USER_ROLES.includes('admin') || USER_ROLES.includes('users'); }
-function isScorer()  { return isManager() || USER_ROLES.includes('scorer'); }
+function isAdmin()  { return USER_ROLES.includes('admin'); }
+function isScorer() { return USER_ROLES.includes('admin') || USER_ROLES.includes('scorer'); }
 function isResponsable() { return USER_ROLES.includes('responsable'); }
 // Live bloqué = spectateur ET liveOpen pas encore true
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
@@ -179,26 +174,20 @@ document.addEventListener('visibilitychange', async ()=>{
 // AUTH
 // ══════════════════════════════════════════════════════════
 async function getUserProfile(uid){
-  // Les règles Firestore acceptent le rôle dans `role` OU `roles` : on fait pareil (union).
-  // En cas d'erreur de lecture : 2 essais puis null (jamais de rétrogradation silencieuse en spectateur).
-  for(let attempt=0; attempt<2; attempt++){
-    try {
-      const snap = await getDoc(doc(db,'users',uid));
-      if(snap.exists()){
-        const d = snap.data();
-        let roles = Array.isArray(d.roles) ? d.roles.slice() : [];
-        if(d.role && !roles.includes(d.role)) roles.push(d.role);
-        if(!roles.length) roles = ['spectator'];
-        if(roles.length > 1) roles = roles.filter(r=>r!=='spectator');
-        return { roles, name: d.name || '', clubName: d.clubName || '', maxPlayers: d.maxPlayers || 0 };
-      }
-      return { roles:['spectator'], name:'', clubName:'', maxPlayers:0 };
-    } catch(e){
-      console.warn('getUserProfile error:', e);
-      await new Promise(r=>setTimeout(r,700));
+  try {
+    const snap = await getDoc(doc(db,'users',uid));
+    if(snap.exists()){
+      const d = snap.data();
+      const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
+      return {
+        roles,
+        name: d.name || '',
+        clubName: d.clubName || '',
+        maxPlayers: d.maxPlayers || 0
+      };
     }
-  }
-  return null;
+  } catch(e){ console.warn('getUserProfile error:', e); }
+  return { roles:['spectator'], name:'', clubName:'', maxPlayers:0 };
 }
 async function ensureUserDoc(user){
   const ref  = doc(db,'users',user.uid);
@@ -219,30 +208,22 @@ onAuthStateChanged(auth, async (user)=>{
   if(USER_ROLE === 'spectator' && !user) return;
   if(user){
     CURRENT_USER = user;
-    try { await ensureUserDoc(user); } catch(e){ console.warn('ensureUserDoc', e); }
+    await ensureUserDoc(user);
     const profile = await getUserProfile(user.uid);
-    if(!profile){
-      await signOut(auth);
-      CURRENT_USER = null; USER_ROLE = null; USER_ROLES = [];
-      showLogin();
-      showAuthMsg('Impossible de charger votre profil. Réessayez dans un instant.', 'red');
-      return;
-    }
     USER_ROLES = profile.roles;
     RESP_PROFILE = { clubName: profile.clubName || profile.name || 'Mon club', name: profile.name||'', maxPlayers: profile.maxPlayers||0 };
-    const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('users') || USER_ROLES.includes('scorer');
+    const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
     const hasResp  = USER_ROLES.includes('responsable');
     // Accès combiné automatique : le staff (admin/scorer) passe toujours par l'appli principale,
     // avec en plus un accès direct à son espace club s'il a aussi le rôle "responsable".
     if(hasStaff){
-      USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : (USER_ROLES.includes('users') ? 'users' : 'scorer');
+      USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : 'scorer';
       showApp();
       subscribeToTournament();
       subscribeToResults();
       subscribeToMessages();
       toggleClubExtraNav(hasResp);
-      if(isManager()) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
-      if(hasResp) showAccessChoice();               // double rôle : où souhaitez-vous aller ?
+      if(USER_ROLES.includes('admin')) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
       return;
     }
     // Responsable club (seul rôle) : écran dédié d'inscription, pas d'accès à l'appli tournoi
@@ -433,23 +414,40 @@ window.adminCreateUser = async function(){
   if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
   if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
+  let clubName='', maxPlayers=0;
+  if(roles.includes('responsable')){
+    clubName = document.getElementById('newU_club').value.trim();
+    maxPlayers = +document.getElementById('newU_maxPlayers').value || 0;
+    if(!clubName||maxPlayers<1){ msg.textContent='Club et quota (≥1) requis pour un responsable.'; msg.style.color='var(--red)'; return; }
+  }
   try {
     // Créer l'utilisateur via la REST API Firebase Auth (sans déconnecter l'admin)
-    const acc = await createOrReviveAccount(email, pwd);
-    const uid = acc.uid;
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
+      { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email, password:pwd, returnSecureToken:true }) }
+    );
+    const data = await res.json();
+    if(data.error){ throw new Error(data.error.message); }
+    const uid = data.localId;
     // Créer le doc Firestore (role = premier rôle pour compat. affichage, roles = liste complète)
     const userDoc = { email, name, role: roles[0], roles, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid };
+    if(roles.includes('responsable')){ userDoc.clubName = clubName; userDoc.maxPlayers = maxPlayers; }
     await setDoc(doc(db,'users',uid), userDoc);
     await auditLog('admin_create_user',{ uid, email, name, roles });
-    msg.textContent=`✅ Compte ${acc.revived?'réactivé':'créé'} : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
+    msg.textContent=`✅ Compte créé : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
     document.getElementById('newU_name').value='';
     document.getElementById('newU_email').value='';
     document.getElementById('newU_pwd').value='';
     document.querySelectorAll('.newU_roleChk').forEach(c=>c.checked=false);
+    if(roles.includes('responsable')){
+      document.getElementById('newU_club').value='';
+      document.getElementById('newU_maxPlayers').value='4';
+    }
     toggleNewUResponsableFields();
     setTimeout(()=>{ msg.textContent=''; },4000);
   } catch(e){
-    msg.textContent='❌ '+authErrText(e); msg.style.color='var(--red)';
+    msg.textContent='❌ '+e.message; msg.style.color='var(--red)';
   }
 };
 // ══════════════════════════════════════════════════════════
@@ -546,7 +544,7 @@ async function loadRegistrationSettings(){
 }
 
 window.openAdminRegSettings = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   await loadRegistrationSettings();
   document.getElementById('regS_respEnabled').checked = REG_SETTINGS.responsableEnabled;
   document.getElementById('regS_openEnabled').checked = REG_SETTINGS.openEnabled;
@@ -561,7 +559,7 @@ window.openAdminRegSettings = async function(){
 };
 
 window.saveRegistrationSettings = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   const msg = document.getElementById('regSettingsMsg');
   const responsableEnabled = document.getElementById('regS_respEnabled').checked;
   const openEnabled = document.getElementById('regS_openEnabled').checked;
@@ -582,7 +580,7 @@ window.saveRegistrationSettings = async function(){
 // depuis un autre appareil) met à jour la liste automatiquement, sans
 // bouton "Charger" à recliquer.
 window.loadPendingRegistrations = function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   if(unsubPendingRegs) { renderPendingRegistrations(); return; } // déjà abonné
   const listEl = document.getElementById('regPendingList');
   if(listEl && !REG_PENDING.length) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0;font-size:13px">Chargement…</div>';
@@ -598,76 +596,22 @@ window.loadPendingRegistrations = function(){
     unsubPendingRegs = null;
     const le = document.getElementById('regPendingList');
     if(le) le.innerHTML='<div style="color:var(--red);font-size:13px">Erreur : '+e.message+' — nouvelle tentative…</div>';
-    setTimeout(()=>{ if(isManager() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
+    setTimeout(()=>{ if(isAdmin() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
   });
 };
-// Regroupe une liste d'inscriptions en attente PAR CLUB (même si les inscriptions d'un club
-// ont été faites à des moments différents). L'ordre de priorité global (#n) reste celui de la liste.
-function groupByClubHTML(list, clubOf, cardFn){
-  const groups = new Map();
-  list.forEach((r,i)=>{
-    const name = String(clubOf(r) || '').trim() || '— Sans club —';
-    const key = name.toLowerCase();
-    if(!groups.has(key)) groups.set(key, { name, items:[] });
-    groups.get(key).items.push({ r, i });
+function updatePendingCounters(){
+  const n = REG_PENDING.length;
+  ['regPendingCount','regOnlinePendingCount'].forEach(id=>{
+    const el = document.getElementById(id); if(!el) return;
+    el.textContent = String(n); el.classList.toggle('on', n>0);
   });
-  return [...groups.values()].sort((a,b)=>a.name.localeCompare(b.name,'fr')).map(g=>{
-    const nRes = g.items.filter(x=>x.r.reserve).length;
-    return `<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:var(--ink);padding:6px 4px;border-bottom:2px solid var(--bdr2);margin-bottom:8px">🏟️ ${g.name} <span style="font-weight:400;color:var(--muted);font-size:12px">— ${g.items.length} en attente${nRes?` (dont ${nRes} réserve)`:''}</span></div>${g.items.map(x=>cardFn(x.r,x.i)).join('')}</div>`;
-  }).join('');
+  ['adminBtnCount','drawerAdminBtnCount'].forEach(id=>{
+    const el = document.getElementById(id); if(!el) return;
+    el.textContent = n ? String(n) : ''; el.style.display = n ? 'inline-block' : 'none';
+  });
 }
-const AUTH_API_KEY = 'AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc';
-async function authRest(endpoint, body){
-  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${AUTH_API_KEY}`,
-    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  return res.json();
-}
-// Supprimer un compte dans l'appli n'efface que sa FICHE (Firestore) : l'adresse email reste dans
-// Firebase Authentication (le navigateur ne peut pas la supprimer). Si on recrée un compte avec la
-// même adresse, on le « réactive » : 1) même mot de passe → on récupère le compte et on recrée la fiche ;
-// 2) autre mot de passe → on envoie un email de réinitialisation.
-async function createOrReviveAccount(email, pwd){
-  const d = await authRest('accounts:signUp', { email, password:pwd, returnSecureToken:true });
-  if(!d.error) return { uid: d.localId, revived:false };
-  if(d.error.message !== 'EMAIL_EXISTS') throw new Error(d.error.message);
-  const si = await authRest('accounts:signInWithPassword', { email, password:pwd, returnSecureToken:true });
-  if(!si.error){
-    // Ne jamais écraser une fiche existante (compte encore actif)
-    try {
-      const ex = await getDoc(doc(db,'users',si.localId));
-      if(ex.exists()){
-        const r = ex.data().roles || [ex.data().role];
-        throw new Error('Un compte actif existe déjà avec cet email (rôles : ' + r.join(', ') + '). Un admin peut lui ajouter le rôle avec « 🔗 Ajouter le rôle … à un compte existant ».');
-      }
-    } catch(e){ if(/compte actif/.test(String(e.message))) throw e; /* lecture refusée : la fiche n'existe pas (ou n'est pas lisible) */ }
-    return { uid: si.localId, revived:true };
-  }
-  try { await authRest('accounts:sendOobCode', { requestType:'PASSWORD_RESET', email }); } catch(_){}
-  const err = new Error('EMAIL_RESET_SENT'); err.resetSent = true; throw err;
-}
-function authErrText(e){
-  if(e && e.resetSent) return "Cet email existait déjà dans Firebase (ancienne édition) avec un autre mot de passe. Un email de réinitialisation vient de lui être envoyé : après avoir choisi son mot de passe et s'être connectée une première fois, un admin l'ajoute avec « 🔗 Ajouter le rôle … à un compte existant ». (Ou supprimez l'email dans la console Firebase › Authentication.)";
-  return (e && e.message);
-}
-// Compte à double rôle (staff + club/responsable) : on demande où aller à la connexion
-function showAccessChoice(){
-  const old = document.getElementById('accessChoiceOverlay'); if(old) old.remove();
-  const ov = document.createElement('div');
-  ov.id = 'accessChoiceOverlay';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px';
-  ov.innerHTML = `<div style="background:var(--s1,#fff);color:var(--ink,#222);border-radius:14px;padding:22px;max-width:400px;width:100%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)">
-    <div style="font-size:18px;font-weight:800;margin-bottom:6px">Où souhaitez-vous aller ?</div>
-    <div style="font-size:13px;opacity:.7;margin-bottom:16px">Votre compte a plusieurs accès.</div>
-    <button class="btn btn-g" style="width:100%;margin-bottom:10px" onclick="chooseAccess('club')">🏟️ Inscrire mes joueurs (mon club)</button>
-    <button class="btn btn-ghost" style="width:100%" onclick="chooseAccess('app')">🏆 Gestion / scores du tournoi</button>
-  </div>`;
-  document.body.appendChild(ov);
-}
-window.chooseAccess = function(k){
-  const ov = document.getElementById('accessChoiceOverlay'); if(ov) ov.remove();
-  if(k==='club') openResponsableFromApp();
-};
 function renderPendingRegistrations(){
+  updatePendingCounters();
   const listEl = document.getElementById('regPendingList');
   if(!listEl) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
@@ -685,7 +629,7 @@ function renderPendingRegistrations(){
   const genderIcon = { M:'♂', F:'♀', X:'⚧' };
   const bulkBtn = document.getElementById('regValidateAllBtn');
   if(bulkBtn) bulkBtn.style.display = REG_PENDING.length ? '' : 'none';
-  const cardAM = (r,i)=>{
+  listEl.innerHTML = REG_PENDING.map((r,i)=>{
     const origin = r.source==='responsable' ? `🏟️ ${r.responsableName||'Responsable'}` : '📝 Inscription libre';
     const lv = r.lv || 3;
     const g = genderIcon[r.g] || '⚧';
@@ -701,12 +645,10 @@ function renderPendingRegistrations(){
         <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
       </div>
     </div>`;
-  };
-  // Joueurs rangés par club (l'ordre de priorité #n reste global)
-  listEl.innerHTML = groupByClubHTML(REG_PENDING, r=>r.club||r.responsableName, cardAM);
+  }).join('');
 }
 window.validateAllPending = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
   let free = Math.max(0, max - ST.players.length);
   if(free<=0){ alert('Aucune place disponible : le quota du tournoi est déjà atteint.'); return; }
@@ -727,7 +669,7 @@ window.validateAllPending = async function(){
   alert(`${ok} inscription${ok>1?'s':''} validée${ok>1?'s':''}.` + (fail?` ${fail} échec${fail>1?'s':''} (voir console).`:'') + (queue.length>toValidate.length ? `\n${queue.length-toValidate.length} joueur(s) restent en liste d'attente, quota atteint.` : ''));
 };
 window.validateRegistration = async function(id){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   const reg = REG_PENDING.find(r=>r.id===id);
   if(!reg) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
@@ -745,7 +687,7 @@ window.validateRegistration = async function(id){
   } catch(e){ alert('Erreur : '+e.message); }
 };
 window.rejectRegistration = async function(id){
-  if(!isManager()||!confirm('Refuser et supprimer cette inscription ?')) return;
+  if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
   try {
     const reg = REG_PENDING.find(r=>r.id===id);
     await deleteDoc(doc(db,'americano_registrations',id));
@@ -756,7 +698,6 @@ window.rejectRegistration = async function(id){
 
 // ── Espace responsable club ────────────────────────────────
 window.toggleClubExtraNav = function(show){
-  if(!show){ const ov=document.getElementById('accessChoiceOverlay'); if(ov) ov.remove(); }
   const b1 = document.getElementById('clubExtraBtn');
   const b2 = document.getElementById('drawerClubExtraBtn');
   if(b1) b1.style.display = show ? '' : 'none';
@@ -771,7 +712,7 @@ window.showResponsableScreen = async function(){
   if(!RESP_PROFILE) RESP_PROFILE = { clubName:'Mon club', name:'', maxPlayers:0 };
   const nameEl = document.getElementById('respHdrName');
   if(nameEl) nameEl.textContent = '🏟️ ' + RESP_PROFILE.clubName;
-  const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('users') || USER_ROLES.includes('scorer');
+  const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
   const backBtn = document.getElementById('respBackToAppBtn');
   const logoutBtn = document.getElementById('respLogoutBtn');
   if(backBtn)   backBtn.style.display   = hasStaff ? '' : 'none';
@@ -1139,15 +1080,13 @@ function showApp(){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
-  // Pages 1-3 (Config, Joueurs, Planning) : admin / users uniquement → les autres démarrent sur le Live
-  if(!isManager() && [1,2,3].includes(ST.page)) goTo(4);
 }
 function roleBadge(role){
-  const map={admin:'👑 Admin',users:'🛠 Users',scorer:'✏️ Scorer',spectator:'👁 Spectateur',responsable:'🏟️ Responsable club'};
+  const map={admin:'👑 Admin',scorer:'✏️ Scorer',spectator:'👁 Spectateur',responsable:'🏟️ Responsable club'};
   return map[role]||role;
 }
 function applyRoleUI(){
-  if(!isManager()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
+  if(!isAdmin()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
   kickTimerWatchers(); // (re)branche le chrono synchronisé une fois connecté
   const name = CURRENT_USER
     ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
@@ -1166,13 +1105,9 @@ function applyRoleUI(){
   const stepNav = document.getElementById('stepNav');
   if(stepNav) stepNav.style.display = isSpec ? 'none' : '';
 
-  const linkSubEl = document.getElementById('admLinkSub');
-  if(linkSubEl) linkSubEl.style.display = isAdmin() ? '' : 'none';
-  const staffBoxEl = document.getElementById('admStaffBox');
-  if(staffBoxEl){ staffBoxEl.style.display = isAdmin() ? '' : 'none'; if(!isAdmin()) staffBoxEl.open = false; }
   // Éléments admin-only
   document.querySelectorAll('[data-role="admin"]').forEach(el=>{
-    el.style.display = isManager() ? '' : 'none';
+    el.style.display = isAdmin() ? '' : 'none';
   });
   // Éléments scorer+admin
   document.querySelectorAll('[data-role="scorer"]').forEach(el=>{
@@ -1189,7 +1124,7 @@ function updateStepVisibility(){
   // Admin : étapes 1–5 | Scorer/Spectateur : 4–5 seulement
   [1,2,3].forEach(n=>{
     const el=document.querySelector(`.step[data-s="${n}"]`);
-    if(el) el.style.display = isManager() ? '' : 'none';
+    if(el) el.style.display = isAdmin() ? '' : 'none';
   });
 }
 
@@ -1201,8 +1136,6 @@ function closeAdminPanel(){
   const el = document.getElementById('adminPanel');
   if(el) el.style.display = 'none';
   if(unsubUserList){ unsubUserList(); unsubUserList=null; }
-  if(unsubRespList){ unsubRespList(); unsubRespList=null; }
-  if(unsubRespCounts){ unsubRespCounts(); unsubRespCounts=null; }
   const pw = document.getElementById('newU_pwd'); if(pw) pw.value = '';
 }
 window.closeAdminPanel = closeAdminPanel;
@@ -1217,12 +1150,11 @@ window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
   const opening = el.style.display==='none';
   el.style.display = opening ? 'block' : 'none';
-  if(opening && isManager()){
+  if(opening && isAdmin()){
     // Tout se charge automatiquement dès l'ouverture du panneau —
     // plus besoin de cliquer sur "Charger" / "Rafraîchir".
     window.openAdminRegSettings();
-    if(isAdmin()) window.loadUserList();   // comptes staff : admin uniquement
-    window.loadRespList();                 // responsables de club : admin + users
+    window.loadUserList();
   }
 };
 
@@ -1241,9 +1173,8 @@ window.loadUserList = function(){
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
       const isMe = CURRENT_USER && uid===CURRENT_USER.uid;
-      const roleIconMap={admin:'👑',users:'🛠',scorer:'✏️',spectator:'👁',responsable:'🏟️'};
+      const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',responsable:'🏟️'};
       const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
-      if(roles.length===1 && roles[0]==='responsable') return; // compte responsable : dossier « Responsables de club »
       const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
       const uidShort = uid.slice(0,6)+'…'+uid.slice(-4);
       const safeName = (u.name||u.email||uid).replace(/'/g,"\\'");
@@ -1298,8 +1229,6 @@ window.copyUID = function(uid, btn){
 // ── Ouvrir directement le formulaire "Modifier rôle" pré-rempli
 //    depuis la liste des utilisateurs (plus besoin de taper l'UID) ──
 window.adminEditUserRole = async function(uid, name){
-  if(!isAdmin()) return;
-  const staffBox = document.getElementById('admStaffBox'); if(staffBox) staffBox.open = true;
   const input = document.getElementById('adminUidInput');
   if(input) input.value = uid;
   await window.loadUserRolesIntoForm();
@@ -1313,112 +1242,6 @@ window.adminEditUserRole = async function(uid, name){
   }
 };
 
-// ── Responsables de club : création, liste, quota, suppression (admin + users) ──
-window.adminCreateResp = async function(){
-  if(!isManager()) return;
-  const clubName = document.getElementById('newR_name').value.trim();
-  const email    = document.getElementById('newR_email').value.trim();
-  const pwd      = document.getElementById('newR_pwd').value;
-  const maxPlayers = +document.getElementById('newR_max').value || 1;
-  const msg      = document.getElementById('newRespMsg');
-  if(!clubName||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
-  if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
-  try {
-    const acc = await createOrReviveAccount(email, pwd);
-    const data = { localId: acc.uid };
-    await setDoc(doc(db,'users',data.localId), { email, clubName, name:clubName, role:'responsable', roles:['responsable'], maxPlayers, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid });
-    await auditLog('admin_create_resp',{ uid:data.localId, email, clubName, maxPlayers });
-    msg.textContent=`✅ Compte responsable ${acc.revived?'réactivé':'créé'} : ${clubName} (${maxPlayers} inscription${maxPlayers>1?'s':''} max)`; msg.style.color='var(--grn)';
-    ['newR_name','newR_email','newR_pwd'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('newR_max').value='4';
-    setTimeout(()=>{ msg.textContent=''; },5000);
-  } catch(e){ msg.textContent='❌ '+authErrText(e); msg.style.color='var(--red)'; }
-};
-window.loadRespList = function(){
-  if(!isManager()) return;
-  const listEl = document.getElementById('respListBody'); if(!listEl) return;
-  if(unsubRespList) return; // déjà abonné
-  listEl.innerHTML = '<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
-  let latest = [], counts = {};
-  const render = ()=>{
-    if(latest.length===0){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun responsable créé.</td></tr>'; return; }
-    listEl.innerHTML='';
-    latest.forEach(c=>{
-      const used = counts[c.uid]||0;
-      const tr = document.createElement('tr');
-      tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
-      tr.innerHTML = `<td data-label="Club" style="padding:8px 6px;color:var(--ink);font-weight:600">${c.clubName||c.name||'—'}</td>
-        <td data-label="Email" style="padding:8px 6px;color:var(--muted);font-size:12px">${c.email||'—'}</td>
-        <td data-label="Inscrits" style="padding:8px 6px">${used} / ${c.maxPlayers||0}</td>
-        <td data-label="Quota" style="padding:8px 6px">
-          <input type="number" min="0" id="respMax_${c.uid}" value="${c.maxPlayers||0}" style="width:60px;padding:3px 6px;background:#fff;border:1px solid var(--bdr2);color:var(--ink)">
-          <button onclick="updateRespQuota('${c.uid}')" style="background:none;border:1px solid var(--bdr2);color:var(--ink);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">✓</button>
-        </td>
-        <td data-label="Action" style="padding:8px 6px;text-align:center">
-          <button onclick="deleteResp('${c.uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">Suppr.</button>
-        </td>`;
-      listEl.appendChild(tr);
-    });
-  };
-  unsubRespList = onSnapshot(query(collection(db,'users'), where('roles','array-contains','responsable')), (snap)=>{
-    latest = [];
-    snap.forEach(d=>{ latest.push({ uid:d.id, ...d.data() }); });
-    render();
-  }, (e)=>{ listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);font-size:13px;padding:10px 0">Erreur : ${e.message}</td></tr>`; });
-  unsubRespCounts = onSnapshot(collection(db,'americano_registrations'), (snap)=>{
-    counts = {};
-    snap.forEach(d=>{ const r=d.data(); if(r.responsableUid) counts[r.responsableUid]=(counts[r.responsableUid]||0)+1; });
-    render();
-  });
-};
-// ── Ajouter le rôle « responsable » à un compte EXISTANT (ex : scorer/admin qui est aussi responsable de club) ──
-window.adminLinkRespRole = async function(){
-  const msg = document.getElementById('linkRespMsg');
-  const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
-  if(!isAdmin()){ say('Seul un admin peut ajouter un rôle à un compte existant.','var(--red)'); return; }
-  const email = document.getElementById('linkR_email').value.trim();
-  const clubName = document.getElementById('linkR_name').value.trim();
-  const maxPlayers = +document.getElementById('linkR_max').value || 0;
-  if(!email||!clubName||maxPlayers<1){ say('Email, nom du club et quota (≥1) sont requis.','var(--red)'); return; }
-  try {
-    let snap = await getDocs(query(collection(db,'users'), where('email','==',email)));
-    if(snap.empty && email !== email.toLowerCase()) snap = await getDocs(query(collection(db,'users'), where('email','==',email.toLowerCase())));
-    if(snap.empty){ say('❌ Aucun compte avec cet email. Créez-le d\'abord dans « Créer un compte responsable de club ».','var(--red)'); return; }
-    const d = snap.docs[0], data = d.data();
-    let roles = Array.isArray(data.roles) ? data.roles.slice() : [];
-    if(data.role && !roles.includes(data.role)) roles.push(data.role);
-    roles = roles.filter(r=>r!=='spectator');
-    if(!roles.includes('responsable')) roles.push('responsable');
-    await updateDoc(d.ref, { roles, role: roles[0], clubName, maxPlayers });
-    await auditLog('link_resp_role',{ uid:d.id, email, clubName, maxPlayers });
-    say(`✅ ${email} est maintenant responsable du club « ${clubName} » (${maxPlayers} inscription${maxPlayers>1?'s':''} max) en plus de ses autres rôles.`,'var(--grn)');
-    ['linkR_email','linkR_name'].forEach(id=>document.getElementById(id).value='');
-  } catch(e){ say('❌ '+e.message,'var(--red)'); }
-};
-window.updateRespQuota = async function(uid){
-  if(!isManager()) return;
-  const val = +document.getElementById(`respMax_${uid}`).value || 0;
-  try { await updateDoc(doc(db,'users',uid), { maxPlayers: val }); }
-  catch(e){ alert('Erreur : '+e.message); }
-};
-window.deleteResp = async function(uid){
-  if(!isManager()) return;
-  try {
-    const snap = await getDoc(doc(db,'users',uid));
-    const d = snap.exists() ? snap.data() : {};
-    const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role];
-    const others = roles.filter(r=>r && r!=='responsable');
-    if(others.length){
-      if(!isAdmin()){ alert('Ce compte a aussi un rôle staff : seul un admin peut lui retirer le rôle responsable.'); return; }
-      if(!confirm('Ce compte a aussi le(s) rôle(s) : '+others.join(', ')+'.\nSeul le rôle « responsable » sera retiré (le compte est conservé). Continuer ?')) return;
-      await updateDoc(doc(db,'users',uid), { roles: others, role: others[0], clubName:'', maxPlayers:0 });
-    } else {
-      if(!confirm('Supprimer ce responsable ? Ses joueurs déjà validés et intégrés au tournoi ne seront pas retirés.\n\nNote : l\'adresse email reste enregistrée dans Firebase Authentication ; si vous recréez un compte avec cette adresse, il sera réactivé automatiquement.')) return;
-      await deleteDoc(doc(db,'users',uid));
-    }
-    await auditLog('admin_delete_resp',{ uid });
-  } catch(e){ alert('Erreur : '+e.message); }
-};
 window.adminDeleteUser = async function(uid, name){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm(`Supprimer l'utilisateur "${name}" ?\nCette action est irréversible.`)) return;
@@ -1451,7 +1274,10 @@ window.loadUserRolesIntoForm = async function(){
     const d = snap.data();
     const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
     document.querySelectorAll('.chgU_roleChk').forEach(c=> c.checked = roles.includes(c.value));
-    msg.textContent = `✅ Rôles actuels chargés : ${roles.join(', ')}` + (roles.includes('responsable') ? ' (le rôle responsable se gère dans « Responsables de club »)' : ''); msg.style.color='var(--grn)';
+    document.getElementById('chgU_club').value = d.clubName || '';
+    document.getElementById('chgU_maxPlayers').value = d.maxPlayers || 4;
+    toggleChgUResponsableFields();
+    msg.textContent = `✅ Rôles actuels chargés : ${roles.join(', ')}`; msg.style.color='var(--grn)';
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
 window.setUserRole = async function(){
@@ -1460,16 +1286,16 @@ window.setUserRole = async function(){
   const roles = Array.from(document.querySelectorAll('.chgU_roleChk:checked')).map(c=>c.value);
   const msg   = document.getElementById('adminRoleMsg');
   if(!uid){ alert("Entrez l'UID de l'utilisateur."); return; }
+  if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
+  const update = { role: roles[0], roles };
+  if(roles.includes('responsable')){
+    const clubName = document.getElementById('chgU_club').value.trim();
+    const maxPlayers = +document.getElementById('chgU_maxPlayers').value || 0;
+    if(!clubName||maxPlayers<1){ msg.textContent='Club et quota (≥1) requis pour un responsable.'; msg.style.color='var(--red)'; return; }
+    update.clubName = clubName; update.maxPlayers = maxPlayers;
+  }
   try {
-    // Le rôle « responsable » existant est conservé tel quel (géré dans le dossier Responsables de club)
-    const cur = await getDoc(doc(db,'users',uid));
-    if(!cur.exists()){ msg.textContent='❌ Utilisateur introuvable.'; msg.style.color='var(--red)'; return; }
-    const cd = cur.data();
-    const curRoles = Array.isArray(cd.roles) ? cd.roles : [];
-    const hadResp = curRoles.includes('responsable') || cd.role === 'responsable';
-    if(roles.length===0 && !hadResp){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
-    if(hadResp) roles.push('responsable');
-    await setDoc(doc(db,'users',uid), { role: roles[0], roles }, { merge:true });
+    await setDoc(doc(db,'users',uid), update, { merge:true });
     await auditLog('set_role',{ targetUid:uid, roles });
     msg.textContent='✅ Rôle(s) mis à jour !'; msg.style.color='var(--grn)';
     setTimeout(()=>{ msg.textContent=''; },3000);
@@ -1495,11 +1321,11 @@ function subscribeToTournament(){
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
     if(ST.page==='TV') renderTVContent();
-    if(isManager() && ST.page===1) syncCfgForm();
-    if(isManager() && ST.page===2) renderPlayers();
+    if(isAdmin() && ST.page===1) syncCfgForm();
+    if(isAdmin() && ST.page===2) renderPlayers();
     if(unsubPendingRegs) renderPendingRegistrations(); // quota / places restantes à jour
     // Scorer : si le tournoi est actif et sur une page setup, rediriger vers p4
-    if(!isManager() && ST.schedule.length>0 && ST.page<4) goTo(4);
+    if(!isAdmin() && ST.schedule.length>0 && ST.page<4) goTo(4);
   });
 }
 function subscribeToResults(){
@@ -1522,7 +1348,7 @@ async function saveTournament(fields){
     try { await setDoc(doc(db,'tournamentStatus','live'), { liveOpen: fields.liveOpen }, { merge:true }); }
     catch(e){ console.warn('saveTournament status', e); }
   }
-  if(!isManager()){ alert("Action réservée à l'admin."); return; }
+  if(!isAdmin()){ alert("Action réservée à l'admin."); return; }
   try {
     await setDoc(doc(db,'tournament','current'),{
       ...fields, updatedAt: serverTimestamp()
@@ -1632,8 +1458,6 @@ window.spectatorGoLive = async function(n){
 };
 
 window.goTo = function(n){
-  // Pages 1-3 réservées aux gestionnaires (admin / users), même avec le live ouvert.
-  if(!isManager() && (n===1 || n===2 || n===3)) n = 4;
   closeAdminPanel(); // changement de page = le panneau admin se referme
   // Spectateur : bloquer toute navigation si live fermé
   if(isLiveBlocked() && n !== 'R'){
@@ -1656,7 +1480,7 @@ window.goTo = function(n){
     return;
   }
   // Pages 1-3 : admin uniquement
-  if(n<=3 && !isManager()){
+  if(n<=3 && !isAdmin()){
     if(ST.schedule.length>0){ n=4; }
     else {
       // spectateur sans tournoi actif : afficher un message doux
@@ -1678,7 +1502,7 @@ window.goTo = function(n){
   document.getElementById('page'+n).classList.add('active');
   ST.page=n;
   // Bouton retour : uniquement pour admin (scorers/spectateurs n'ont pas de workflow linéaire)
-  document.getElementById('backBtn').style.display=(isManager()&&n>1)?'':'none';
+  document.getElementById('backBtn').style.display=(isAdmin()&&n>1)?'':'none';
   updateFwdBtn();
   updateSteps(n);
   window.scrollTo(0,0);
@@ -1690,12 +1514,12 @@ window.goTo = function(n){
 };
 window.goBack = function(){
   if(ST.rulesOpen){toggleRules();return;}
-  if(isManager() && ST.page>1) goTo(ST.page-1);
+  if(isAdmin() && ST.page>1) goTo(ST.page-1);
 };
 
 // ─── Navigation vers la page suivante (si déjà générée) ───
 function canGoFwd(){
-  if(!isManager()) return false;
+  if(!isAdmin()) return false;
   if(ST.rulesOpen) return false;
   const n = ST.cfg && ST.cfg.n ? ST.cfg.n : 0;
   if(ST.page===1) return n >= 4;
@@ -1743,13 +1567,13 @@ window.toggleRules = function(){
     return;
   }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  const backPage = ST.rulesOpen ? 'pageR' : 'page'+(isManager()?ST.page:4);
+  const backPage = ST.rulesOpen ? 'pageR' : 'page'+(isAdmin()?ST.page:4);
   document.getElementById(backPage).classList.add('active');
   document.getElementById('ruleBtn').textContent=ST.rulesOpen?'× Fermer':'📋 Règlement';
-  document.getElementById('backBtn').style.display=(ST.rulesOpen||ST.page>1)&&isManager()?'':'none';
+  document.getElementById('backBtn').style.display=(ST.rulesOpen||ST.page>1)&&isAdmin()?'':'none';
   updateFwdBtn();
   if(ST.rulesOpen) applyRoleUI(); // re-appliquer les rôles pour afficher les boutons admin dans pageR
-  if(!ST.rulesOpen) updateSpectatorNav(isManager()?ST.page:4);
+  if(!ST.rulesOpen) updateSpectatorNav(isAdmin()?ST.page:4);
 };
 
 // ══════════════════════════════════════════════════════════
@@ -1781,7 +1605,7 @@ function syncCfgForm(){
 }
 
 window.saveCfgAndNext = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   const cfg=getCfg(); ST.cfg=cfg;
   await saveTournament({ cfg, status:'setup' });
   goTo(2);
@@ -1791,7 +1615,7 @@ window.saveCfgAndNext = async function(){
 // PAGE 2 — JOUEURS (admin uniquement pour ajouter/supprimer)
 // ══════════════════════════════════════════════════════════
 window.addPlayer = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   const nm=document.getElementById('p_nm').value.trim();
   if(!nm){ document.getElementById('p_nm').focus(); return; }
   ST.players.push({id:'p'+Date.now()+Math.random(),name:nm,
@@ -1803,18 +1627,18 @@ window.addPlayer = async function(){
   await saveTournament({ players: ST.players });
 };
 window.delPlayer = async function(i){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   ST.players.splice(i,1); renderPlayers();
   await saveTournament({ players: ST.players });
 };
 window.clearPl = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   if(!confirm('Vider la liste ?')) return;
   ST.players=[]; renderPlayers();
   await saveTournament({ players: ST.players });
 };
 window.autoFill = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   // Calculer le nombre manquant une seule fois : ST.players.length augmente
   // à chaque ajout et ne doit pas être recalculé dans la condition de boucle.
   const req=Math.max(0,Number(ST.cfg.n)||0);
@@ -1960,7 +1784,7 @@ window.scoreCommit = function(el,r,w,m,f){ scoreFlush(r,w,m); };
 
 window.setRound = async function(r){
   ST.activeRound=r;
-  if(isManager()) await saveTournament({ activeRound: r });
+  if(isAdmin()) await saveTournament({ activeRound: r });
   renderRoundTabs(); renderMatches(); renderSubInfo();
 };
 
@@ -1985,7 +1809,7 @@ async function confirmDiscardScores(){
   return await clearAllResults();
 }
 window.startTournament = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   if(hasAnyScore() || ST.tStatus==='active'){
     if(!confirm('Le tournoi est déjà lancé. Relancer EFFACERA tous les scores. Continuer ?')) return;
   }
@@ -1998,40 +1822,13 @@ window.startTournament = async function(){
   goTo(4);
 };
 window.regenerate = async function(){
-  if(!isManager()) return;
+  if(!isAdmin()) return;
   if(!(await confirmDiscardScores())) return;
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
-// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon de noms.
-// Chaque suppression est indépendante et comptée : rien n'échoue en silence.
-async function purgeRegistrations(){
-  const out = { regs:0, locks:0, errors:[] };
-  for(const [col,key] of [['americano_registrations','regs'],['americano_reg_names','locks']]){
-    try {
-      const snap = await getDocs(collection(db,col));
-      const res = await Promise.allSettled(snap.docs.map(d=>deleteDoc(d.ref)));
-      res.forEach(r=>{ if(r.status==='fulfilled') out[key]++; else out.errors.push(col+' : '+((r.reason&&r.reason.message)||r.reason)); });
-    } catch(e){ out.errors.push(col+' : '+e.message); }
-  }
-  return out;
-}
-function purgeSummary(p){
-  if(p.errors.length) return '⚠️ Nettoyage incomplet : '+p.regs+' inscription(s) et '+p.locks+' verrou(x) effacé(s). Erreur : '+p.errors[0];
-  return '🧹 '+p.regs+' inscription(s) et '+p.locks+' verrou(x) de l\'édition précédente effacé(s).';
-}
-window.purgeAllRegistrations = async function(){
-  if(!isManager()) return;
-  const msg = document.getElementById('purgeMsg');
-  if(!confirm('Effacer TOUTES les inscriptions en ligne (en attente et validées) et les verrous anti-doublon ?\n\nLes joueurs déjà intégrés au tournoi ne sont pas retirés. Les comptes des responsables sont conservés.')) return;
-  if(msg){ msg.textContent='Nettoyage en cours…'; msg.style.color='var(--muted)'; }
-  const p = await purgeRegistrations();
-  if(msg){ msg.textContent = purgeSummary(p); msg.style.color = p.errors.length ? 'var(--red)' : 'var(--grn)'; }
-};
-window.newTournament = async function(){  if(!isManager()){ alert('Admin uniquement.'); return; }
-  if(!confirm('Nouveau tournoi ?\n\nSeront effacés : joueurs, planning, scores ET inscriptions (en attente et validées).\nLes comptes des responsables de club sont conservés.')) return;
+window.newTournament = async function(){  if(!isAdmin()){ alert('Admin uniquement.'); return; }
+  if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
-  const purged = await purgeRegistrations(); // repartir de zéro : inscriptions + verrous de l'édition précédente
-  if(purged.regs || purged.locks || purged.errors.length) alert(purgeSummary(purged));
   await clearAllResults();
   ST.tStatus='setup';
   ST.players=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
@@ -2044,7 +1841,7 @@ window.newTournament = async function(){  if(!isManager()){ alert('Admin uniquem
 
 // ── Réinitialiser tous les scores (admin uniquement) ──────
 window.resetAllScores = async function(){
-  if(!isManager()){ alert('Admin uniquement.'); return; }
+  if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Réinitialiser TOUS les scores ?\nLe planning reste intact, seuls les résultats seront effacés.')) return;
   // Supprimer tous les documents de la collection results
   try {
@@ -2061,7 +1858,7 @@ window.resetAllScores = async function(){
 // SUBSTITUTION (admin uniquement)
 // ══════════════════════════════════════════════════════════
 window.confirmSub = async function(){
-  if(!isManager()){ alert('Les substitutions sont réservées à l\'admin.'); return; }
+  if(!isAdmin()){ alert('Les substitutions sont réservées à l\'admin.'); return; }
   if(!ST.sub.selId){ alert('Sélectionnez un remplaçant.'); return; }
   applySubstitution();
   await saveTournament({ schedule: ST.schedule });
@@ -2201,7 +1998,7 @@ function renderPlayers(){
       <span class="tag tag-${p.g}">${p.g}</span>
       <span class="p-lvl">${'★'.repeat(p.lv)}${'☆'.repeat(5-p.lv)}</span>
       ${isScorer()?`<button class="pedit" title="Modifier le nom" onclick="editPlayerName(${i})">✏️</button>`:''}
-      ${isManager()?`<button class="pdel" onclick="delPlayer(${i})">×</button>`:''}
+      ${isAdmin()?`<button class="pdel" onclick="delPlayer(${i})">×</button>`:''}
     </div>`).join('');
   updateFwdBtn();
 }
@@ -3083,7 +2880,7 @@ function renderMatches(){
   const round=ST.schedule[ST.activeRound];const el=document.getElementById('mList');if(!round||!el)return;
   const mkP=(id)=>{const p=pObj(id);const idx=ST.players.findIndex(x=>x.id===id);return p?`<span data-playeridx="${idx}">${p.name}</span>`:'?';};
   // Bouton substitution uniquement pour admin
-  const mkSubBtn=(id)=>isManager()?`<button class="psub-btn" title="Remplacer ce joueur" onclick="openSub('${id}')">↔</button>`:'';
+  const mkSubBtn=(id)=>isAdmin()?`<button class="psub-btn" title="Remplacer ce joueur" onclick="openSub('${id}')">↔</button>`:'';
   // Bouton édition nom visible pour scorer+admin (en mode tournoi)
   const mkEditBtn=(id,idx)=>isScorer()?`<button class="pedit" title="Modifier le nom" onclick="editPlayerName(${idx})">✏️</button>`:'';
   const normalRdWaves=round.waves.filter(wv=>!wv._isEarlyWave);
@@ -3145,7 +2942,7 @@ function renderMatches(){
 // SUBSTITUTION UI (admin uniquement)
 // ══════════════════════════════════════════════════════════
 window.openSub = function(playerId){
-  if(!isManager()){ alert("Les substitutions sont réservées à l'admin."); return; }
+  if(!isAdmin()){ alert("Les substitutions sont réservées à l'admin."); return; }
   ST.sub={targetId:playerId,selId:null};
   const p=pObj(playerId);
   document.getElementById('subDesc').innerHTML=`Remplacer <strong>${p?p.name:'?'}</strong> à partir du <strong>tour ${ST.activeRound+1}</strong>.<br>Les scores des matchs déjà joués restent inchangés.`;
@@ -3908,7 +3705,7 @@ window.openReglement = function(){
 };
 
 window.toggleLiveOpen = async function(){
-  if(!isManager()){ alert('Admin uniquement.'); return; }
+  if(!isAdmin()){ alert('Admin uniquement.'); return; }
   const newVal = !ST.liveOpen;
   handleLiveOpenChange(newVal);
   await saveTournament({ liveOpen: newVal });
@@ -4133,7 +3930,7 @@ function reconcileChrono(){
   if(panel){ const d = want ? '' : 'none'; if(panel.style.display !== d) panel.style.display = d; }
 }
 window.toggleChronoMobile = async function () {
-  if (!isManager()) return;
+  if (!isAdmin()) return;
   const t = document.getElementById('chronoMobileToggle');
   const on = !!(t && t.checked);
   try { await setDoc(doc(db,'tournamentStatus','live'), { chronoMobile: on }, { merge: true }); }
@@ -4409,7 +4206,7 @@ window.showPlayerProgram = function(pid){
     +'</div>'
     +'<div style="display:flex;flex-direction:column;gap:6px">'
     +'<button onclick="document.getElementById(\'playerProgramModal\').remove()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:22px;cursor:pointer;padding:2px 6px;line-height:1">×</button>'
-    +(isManager()?'<button onclick="printPlayerSchedule(\''+pid+'\')" title="Imprimer" style="background:none;border:1px solid rgba(255,255,255,.2);border-radius:6px;color:rgba(255,255,255,.6);font-size:13px;cursor:pointer;padding:3px 8px">🖨</button>':'')
+    +(isAdmin()?'<button onclick="printPlayerSchedule(\''+pid+'\')" title="Imprimer" style="background:none;border:1px solid rgba(255,255,255,.2);border-radius:6px;color:rgba(255,255,255,.6);font-size:13px;cursor:pointer;padding:3px 8px">🖨</button>':'')
     +'</div></div>'
     // Mini stats
     +'<div style="display:flex;gap:8px;margin-top:12px">'
@@ -4426,7 +4223,7 @@ window.showPlayerProgram = function(pid){
     // Footer
     +'<div style="padding:10px 14px;border-top:1px solid rgba(255,255,255,.08);display:flex;gap:8px">'
     +'<button onclick="document.getElementById(\'playerProgramModal\').remove();showPlayerList()" style="flex:1;padding:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:rgba(255,255,255,.7);font-family:\'Oswald\',sans-serif;font-size:13px;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">‹ Retour</button>'
-    +(isManager()?'<button onclick="printPlayerSchedule(\''+pid+'\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#0d2030,#1a3a50);border:1.5px solid #4a7090;border-radius:8px;color:#7adcff;font-family:\'Oswald\',sans-serif;font-size:13px;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">🖨 Imprimer</button>':'')
+    +(isAdmin()?'<button onclick="printPlayerSchedule(\''+pid+'\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#0d2030,#1a3a50);border:1.5px solid #4a7090;border-radius:8px;color:#7adcff;font-family:\'Oswald\',sans-serif;font-size:13px;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">🖨 Imprimer</button>':'')
     +'</div></div>';
 
   document.body.appendChild(pm);
@@ -4606,18 +4403,9 @@ body{font-family:'Exo 2',sans-serif;background:var(--bg);color:var(--ink);min-he
 /* ADMIN PANEL */
 .admin-panel{background:var(--s1);color:var(--ink);padding:16px 20px;border-bottom:2px solid var(--bdr)}
 .admin-panel-ttl{font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px}
-.adm-box{ border:1px solid var(--bdr2);border-radius:12px;margin-bottom:14px;background:var(--s2); }
-.adm-box>summary{ cursor:pointer;padding:12px 14px;font-weight:800;font-size:14px;letter-spacing:.6px;color:var(--ink);list-style:none;user-select:none; }
-.adm-box>summary::-webkit-details-marker{ display:none; }
-.adm-box>summary::before{ content:'▸  '; }
-.adm-box[open]>summary::before{ content:'▾  '; }
-.adm-box>.adm-body{ padding:4px 14px 14px; }
-.adm-sub{ border:1px solid var(--bdr);border-radius:10px;margin:12px 0;background:var(--s1); }
-.adm-sub>summary{ cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;color:var(--ink);list-style:none;user-select:none; }
-.adm-sub>summary::-webkit-details-marker{ display:none; }
-.adm-sub>summary::before{ content:'▸  '; }
-.adm-sub[open]>summary::before{ content:'▾  '; }
-.adm-sub>.adm-body{ padding:2px 12px 12px; }
+.pend-count{display:inline-block;min-width:22px;text-align:center;font-family:'Oswald',sans-serif;font-size:13px;font-weight:700;letter-spacing:0;padding:1px 8px;border-radius:12px;background:rgba(128,128,128,.25);color:var(--muted);vertical-align:middle}
+.pend-count.on{background:#e6a23c;color:#1a1a1a}
+.hdr-badge{display:none;margin-left:6px;min-width:18px;text-align:center;font-size:11px;font-weight:700;padding:0 6px;border-radius:10px;background:var(--red);color:#fff}
 
 /* SPECTATOR NAV BAR */
 .spec-nav{display:none;background:var(--ink2);border-bottom:3px solid #4a6080;padding:0 16px}
@@ -5302,7 +5090,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     <button class="hdr-btn" id="ruleBtn" onclick="toggleRules()">📋 Règlement</button>
     <button class="hdr-btn" id="liveBtn" data-role="scorer" onclick="goToLive()" style="display:none">📺 Live</button>
     <button class="hdr-btn" id="tvBtn" data-role="scorer" onclick="goTo('TV')" style="display:none">📺 Écran</button>
-    <button class="hdr-btn" id="adminBtn" data-role="admin" onclick="toggleAdminPanel()" style="display:none">👑 Admin</button>
+    <button class="hdr-btn" id="adminBtn" data-role="admin" onclick="toggleAdminPanel()" style="display:none">👑 Admin<span class="hdr-badge" id="adminBtnCount"></span></button>
     <button class="hdr-btn" id="clubExtraBtn" onclick="openResponsableFromApp()" style="display:none">🏟️ Mon club</button>
     <button class="hdr-btn" id="backBtn" style="display:none" onclick="goBack()">← Retour</button>
     <button class="hdr-btn" id="fwdBtn" style="display:none" onclick="goFwd()">Suivant →</button>
@@ -5323,7 +5111,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
   <button class="hdr-drawer-btn" onclick="closeMobileMenu();toggleRules()">📋 Règlement</button>
   <button class="hdr-drawer-btn" id="drawerLiveBtn" data-role="scorer" onclick="closeMobileMenu();goToLive()" style="display:none">📺 Live</button>
   <button class="hdr-drawer-btn" id="drawerTvBtn" data-role="scorer" onclick="closeMobileMenu();goTo('TV')" style="display:none">📺 Écran</button>
-  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑 Admin</button>
+  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑 Admin<span class="hdr-badge" id="drawerAdminBtnCount"></span></button>
   <button class="hdr-drawer-btn" id="drawerClubExtraBtn" onclick="closeMobileMenu();openResponsableFromApp()" style="display:none">🏟️ Mon club</button>
   <button class="hdr-drawer-btn" id="drawerBackBtn" style="display:none" onclick="closeMobileMenu();goBack()">← Retour</button>
   <button class="hdr-drawer-btn" id="drawerFwdBtn" style="display:none" onclick="closeMobileMenu();goFwd()">Suivant →</button>
@@ -5334,36 +5122,11 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
 <!-- PANNEAU ADMIN -->
 <div id="adminPanel" style="display:none">
   <div class="admin-panel">
-    <div style="max-width:960px">
-    <details class="adm-box" id="admTourBox" open>
-      <summary>🎛 TOURNOI — live, écran, remise à zéro</summary>
-      <div class="adm-body">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-          <button id="liveToggleBtn" onclick="toggleLiveOpen()"
-      style="flex:1;padding:11px 16px;border-radius:10px;border:2px solid #9d2a2a;background:linear-gradient(135deg,#330d0d,#5c1a1a);color:#dc5d5d;font-family:'Oswald',sans-serif;font-size:15px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;transition:all .25s">
-      🔴 Live fermé
-    </button>
-          <button onclick="goTo('TV')"
-      style="padding:11px 16px;border-radius:10px;border:2px solid #2a6e4a;background:linear-gradient(135deg,#0d2818,#1a3d28);color:#7adcaa;font-family:'Oswald',sans-serif;font-size:13px;font-weight:700;letter-spacing:.6px;cursor:pointer;text-transform:uppercase">
-      📺 Mode Écran
-    </button>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <button class="btn btn-r btn-sm" onclick="resetAllScores()">🗑 Réinitialiser les scores</button>
-          <button class="btn btn-y btn-sm" onclick="newTournament()">🔄 Nouveau tournoi</button>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">« Réinitialiser les scores » efface les résultats et garde le planning. « Nouveau tournoi » efface joueurs, planning et résultats.</div>
-      </div>
-    </details>
-
-    <details class="adm-box" id="admStaffBox">
-      <summary>👔 COMPTES STAFF — admin / users / scorer / spectateur (créer, rôles, utilisateurs)</summary>
-      <div class="adm-body">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;max-width:960px">
 
       <!-- Créer un compte -->
       <div>
-        <div class="admin-panel-ttl">➕ Créer un compte staff</div>
+        <div class="admin-panel-ttl">➕ Créer un compte utilisateur</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
             <label style="color:var(--muted)">Prénom / Nom</label>
@@ -5387,7 +5150,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
                 <input type="checkbox" class="newU_roleChk" value="spectator" onchange="toggleNewUResponsableFields()"> 👁 Spectateur
               </label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
-                <input type="checkbox" class="newU_roleChk" value="users" onchange="toggleNewUResponsableFields()"> 🛠 Users
+                <input type="checkbox" class="newU_roleChk" value="responsable" onchange="toggleNewUResponsableFields()"> 🏟️ Responsable club
               </label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
                 <input type="checkbox" class="newU_roleChk" value="admin" onchange="toggleNewUResponsableFields()"> 👑 Admin
@@ -5397,14 +5160,23 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           <div style="display:flex;justify-content:flex-end">
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
           </div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.5">🏟️ Les comptes de <strong>responsables de club</strong> se créent uniquement dans le dossier « Responsables de club » ci-dessous.</div>
+          <div id="newU_respFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
+            <div>
+              <label style="color:var(--muted)">Nom du club</label>
+              <input type="text" id="newU_club" placeholder="Pickleball Club de..." style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div>
+              <label style="color:var(--muted)">Quota d'inscriptions autorisées</label>
+              <input type="number" id="newU_maxPlayers" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+          </div>
           <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
         </div>
       </div>
 
       <!-- Changer le rôle d'un compte existant -->
       <div id="roleEditBox" style="border-radius:10px">
-        <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s) staff d'un compte</div>
+        <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s) d'un compte</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
             <div style="flex:1;min-width:200px">
@@ -5420,14 +5192,24 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
                 <input type="checkbox" class="chgU_roleChk" value="admin"> 👑 Admin
               </label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
-                <input type="checkbox" class="chgU_roleChk" value="users"> 🛠 Users
-              </label>
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
                 <input type="checkbox" class="chgU_roleChk" value="scorer"> ✏️ Scorer
               </label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
                 <input type="checkbox" class="chgU_roleChk" value="spectator"> 👁 Spectateur
               </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);cursor:pointer">
+                <input type="checkbox" class="chgU_roleChk" value="responsable" onchange="toggleChgUResponsableFields()"> 🏟️ Responsable club
+              </label>
+            </div>
+          </div>
+          <div id="chgU_respFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
+            <div>
+              <label style="color:var(--muted)">Nom du club</label>
+              <input type="text" id="chgU_club" placeholder="Pickleball Club de..." style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
+            </div>
+            <div>
+              <label style="color:var(--muted)">Quota d'inscriptions autorisées</label>
+              <input type="number" id="chgU_maxPlayers" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)">
             </div>
           </div>
           <div style="display:flex;justify-content:flex-end">
@@ -5436,9 +5218,8 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
           <div style="font-size:11px;color:var(--muted);line-height:1.6">
             💡 Astuce : cliquez sur "✏️ Rôle" dans la liste des utilisateurs plus bas pour pré-remplir ce formulaire automatiquement (plus besoin de copier l'UID manuellement). ·
-            Le rôle « responsable » n'est jamais modifié ici (dossier « Responsables de club »). ·
-            <strong style="color:#ffd080">Admin</strong> = tout, y compris ce dossier ·
-            <strong style="color:#80e0a0">Users</strong> = tous les réglages sauf les comptes staff ·
+            Un même compte peut cumuler plusieurs rôles (ex : Scorer + Responsable club) : l'accès combiné se fait automatiquement à la connexion. ·
+            <strong style="color:#ffd080">Admin</strong> = tout ·
             <strong style="color:#80c8ff">Scorer</strong> = scores + noms ·
             <strong style="color:var(--muted)">Spectateur</strong> = lecture seule
           </div>
@@ -5471,61 +5252,10 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
         <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">⚠️ La suppression retire l'utilisateur de Firestore. Pour supprimer aussi le compte d'authentification, rendez-vous dans la console Firebase → Authentication.</div>
       </div>
 
-    </div>
-      </div>
-    </details>
-
-    <details class="adm-box" id="admRespBox">
-      <summary>🏟️ RESPONSABLES DE CLUB &amp; INSCRIPTIONS EN LIGNE</summary>
-      <div class="adm-body">
-        <details class="adm-sub">
-          <summary>➕ Créer un compte responsable de club</summary>
-          <div class="adm-body">
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
-              <div><label style="color:var(--muted)">Nom du club</label><input type="text" id="newR_name" placeholder="Ex : RSTH Pickleball" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-              <div><label style="color:var(--muted)">Email</label><input type="email" id="newR_email" placeholder="club@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-              <div><label style="color:var(--muted)">Mot de passe (6 car. min)</label><input type="password" id="newR_pwd" placeholder="••••••••" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-              <div><label style="color:var(--muted)">Nb d'inscriptions autorisées</label><input type="number" id="newR_max" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-            </div>
-            <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-g btn-sm" onclick="adminCreateResp()">✓ Créer</button></div>
-            <div id="newRespMsg" style="font-size:13px;min-height:18px"></div>
-          </div>
-        </details>
-        <details class="adm-sub">
-          <summary>🧹 Nouvelle édition : effacer les inscriptions de l'ancien tournoi</summary>
-          <div class="adm-body">
-            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">« Nouveau tournoi » le fait déjà automatiquement. Ce bouton permet de le refaire à tout moment : il efface toutes les inscriptions (en attente et validées) et les verrous anti-doublon, pour que les responsables puissent réinscrire les mêmes joueurs. Les comptes responsables sont conservés.</div>
-            <button class="btn btn-r btn-sm" onclick="purgeAllRegistrations()">🧹 Effacer toutes les inscriptions</button>
-            <div id="purgeMsg" style="font-size:13px;min-height:18px;margin-top:8px"></div>
-            <div style="font-size:11px;color:var(--muted);margin-top:6px">Version de l'appli : 21/10 · nettoyage des inscriptions v2</div>
-          </div>
-        </details>
-        <details class="adm-sub" id="admLinkSub">
-          <summary>🔗 Ajouter le rôle responsable à un compte existant (scorer / admin déjà inscrit)</summary>
-          <div class="adm-body">
-            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">Pour un responsable de club dont l'email est déjà utilisé (rôles staff) : il garde ses accès actuels et reçoit en plus l'espace d'inscription des joueurs. À sa connexion, l'appli lui demande où aller. <em>(Admin uniquement)</em></div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
-              <div><label style="color:var(--muted)">Email du compte existant</label><input type="email" id="linkR_email" placeholder="email@exemple.com" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-              <div><label style="color:var(--muted)">Nom du club</label><input type="text" id="linkR_name" placeholder="Ex : RSTH Pickleball" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-              <div><label style="color:var(--muted)">Nb d'inscriptions autorisées</label><input type="number" id="linkR_max" min="1" value="4" style="background:#fff;border-color:var(--bdr2);color:var(--ink)"></div>
-            </div>
-            <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-g btn-sm" onclick="adminLinkRespRole()">✓ Ajouter le rôle responsable</button></div>
-            <div id="linkRespMsg" style="font-size:13px;min-height:18px"></div>
-          </div>
-        </details>
-        <div style="margin:14px 0 8px;font-weight:700;color:var(--ink)">Responsables enregistrés</div>
-        <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--bdr2)">
-          <th style="text-align:left;padding:6px;font-size:11px;text-transform:uppercase;color:var(--muted)">Club</th>
-          <th style="text-align:left;padding:6px;font-size:11px;text-transform:uppercase;color:var(--muted)">Email</th>
-          <th style="text-align:left;padding:6px;font-size:11px;text-transform:uppercase;color:var(--muted)">Inscrits</th>
-          <th style="text-align:left;padding:6px;font-size:11px;text-transform:uppercase;color:var(--muted)">Quota</th>
-          <th style="padding:6px;font-size:11px;text-transform:uppercase;color:var(--muted)">Action</th>
-        </tr></thead><tbody id="respListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Ouvrez le panneau pour charger la liste.</td></tr></tbody></table></div>
-
       <!-- Réglages inscriptions en ligne -->
-      <div style="margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
+      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div class="admin-panel-ttl" style="margin-bottom:0">📋 Inscriptions en ligne</div>
+          <div class="admin-panel-ttl" style="margin-bottom:0">📋 Inscriptions en ligne <span id="regOnlinePendingCount" class="pend-count" title="Joueurs en attente de validation">0</span></div>
           <button onclick="openAdminRegSettings()" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink);padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:'Exo 2',sans-serif;font-weight:600">🔄 Charger</button>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
@@ -5569,20 +5299,18 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
           <div id="regSettingsMsg" style="font-size:13px"></div>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
-          💡 Les <strong style="color:#ffd080">responsables de club</strong> se créent dans « Créer un compte responsable de club » ci-dessus avec leur propre quota. Le <strong style="color:#80c8ff">bouton public</strong> utilise un quota global séparé défini ici. Vous pouvez activer l'un, l'autre, ou les deux en même temps.
+          💡 Les <strong style="color:#ffd080">responsables de club</strong> se créent comme un compte utilisateur ci-dessus (rôle « Responsable club ») avec leur propre quota. Le <strong style="color:#80c8ff">bouton public</strong> utilise un quota global séparé défini ici. Vous pouvez activer l'un, l'autre, ou les deux en même temps.
         </div>
 
         <div style="margin-top:20px">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-            <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
+            <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation <span id="regPendingCount" class="pend-count" title="Joueurs en attente de validation">0</span></div>
             <button id="regValidateAllBtn" class="btn btn-g btn-sm" style="display:none" onclick="validateAllPending()">✓✓ Tout valider (dans la limite des places)</button>
           </div>
           <div id="regPendingCap" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
           <div id="regPendingList"><div style="color:var(--muted);padding:10px 0;font-size:13px">Cliquez sur "Charger" ci-dessus pour afficher les inscriptions en attente.</div></div>
         </div>
       </div>
-      </div>
-    </details>
 
     </div>
   </div>
@@ -5771,6 +5499,18 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     👁 Mode <strong>Spectateur</strong> — vue en lecture seule, mise à jour en temps réel.
   </div>
 
+  <!-- Bouton Live ouvert/fermé — admin uniquement -->
+  <div data-role="admin" style="display:none;margin-bottom:14px;display:flex;gap:8px">
+    <button id="liveToggleBtn" onclick="toggleLiveOpen()"
+      style="flex:1;padding:11px 16px;border-radius:10px;border:2px solid #9d2a2a;background:linear-gradient(135deg,#330d0d,#5c1a1a);color:#dc5d5d;font-family:'Oswald',sans-serif;font-size:15px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;transition:all .25s">
+      🔴 Live fermé
+    </button>
+    <button onclick="goTo('TV')"
+      style="padding:11px 16px;border-radius:10px;border:2px solid #2a6e4a;background:linear-gradient(135deg,#0d2818,#1a3d28);color:#7adcaa;font-family:'Oswald',sans-serif;font-size:13px;font-weight:700;letter-spacing:.6px;cursor:pointer;text-transform:uppercase">
+      📺 Mode Écran
+    </button>
+  </div>
+
   <div class="sec-ttl">🏓 Matchs en cours</div>
   <div class="rtabs" id="rTabs"></div>
   <div id="mList"></div>
@@ -5779,6 +5519,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
   <div class="card mt24">
     <div class="card-ttl">📊 Classement provisoire
       <button class="btn btn-b btn-xs no-print" style="margin-left:auto" onclick="printCurrentRound()">🖨 Imprimer ce tour</button>
+      <button class="btn btn-r btn-xs no-print" data-role="admin" style="display:none;margin-left:6px" onclick="resetAllScores()">🗑 Réinitialiser scores</button>
     </div>
     <div class="ovx"><table class="stbl" id="miniStbl"></table></div>
   </div>
@@ -5809,6 +5550,7 @@ button, .btn, .hdr-btn, .rtab, .spec-nav-btn, .ltab {
     <button class="btn btn-ghost" onclick="goTo(4)">← Retour aux matchs</button>
     <button class="btn btn-b" onclick="printFinal()">🖨 Imprimer classement final</button>
     <button class="btn btn-ghost btn-sm" onclick="printAllResults()">🖨 Imprimer tout</button>
+    <button class="btn btn-y" data-role="admin" onclick="newTournament()" style="display:none">🔄 Nouveau tournoi</button>
   </div>
 </div>
 </div>
